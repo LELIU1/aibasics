@@ -410,6 +410,34 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 <p><strong>算术强度（Arithmetic Intensity, AI）</strong>：</p>
 <p>$$ \mathrm{AI} = \frac{\text{FLOPs}}{\text{Bytes moved}} \quad [\text{FLOP/Byte}] $$</p>
 <p>把它和硬件的"峰值算力 / 峰值带宽"比值比较，就能判断算子属于哪一类：</p>
+<p>⚠️ 先分清三笔账，否则数字永远对不上：</p>
+<table>
+<thead>
+<tr>
+<th>量</th>
+<th>公式里的常数</th>
+<th>跟 dtype 的关系</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>FLOPs</strong>（运算次数）</td>
+<td>$2MNK$，那个 2 是"一乘一加"</td>
+<td><strong>无关</strong>，纯数学量</td>
+</tr>
+<tr>
+<td><strong>Bytes</strong>（搬运量）</td>
+<td>元素数 $\times$ 字节宽（fp32=4, bf16/fp16=2, fp8/int8=1）</td>
+<td><strong>强相关</strong></td>
+</tr>
+<tr>
+<td><strong>峰值 FLOP/s</strong>（算力）</td>
+<td>硬件电路决定</td>
+<td><strong>强相关</strong>，必须选实际执行的 dtype</td>
+</tr>
+</tbody>
+</table>
+<p>统一按 <strong>fp32（4 字节/元素）</strong> 记账：</p>
 <table>
 <thead>
 <tr>
@@ -424,41 +452,125 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 <tr>
 <td>GEMM $(M,N,K)$，大形状</td>
 <td>$2MNK$</td>
-<td>$\approx 2(MK+KN+MN)$</td>
+<td>$(MK+KN+MN)\times4$</td>
 <td>随 $\min(M,N,K)$ 增长，常 &gt; 100</td>
 <td><strong>计算受限</strong></td>
 </tr>
 <tr>
 <td>逐元素（+、ReLU、乘 mask）</td>
 <td>$n$</td>
-<td>$2n$（读+写）或更多</td>
-<td>$\approx 0.25$–$1$</td>
+<td>$2n$ 个元素 $=8n$ B</td>
+<td>$1/8=0.125$</td>
 <td><strong>带宽受限</strong></td>
 </tr>
 <tr>
-<td>softmax（一行一行）</td>
+<td>softmax</td>
 <td>$\approx 3n$</td>
-<td>$2n$（其实可融合到 1 遍）</td>
-<td>$\approx 1$</td>
+<td>$8n$ B（融合后可降到 $4n$ B）</td>
+<td>$\approx 0.375$</td>
 <td><strong>带宽受限</strong></td>
 </tr>
 <tr>
 <td>LayerNorm / RMSNorm</td>
-<td>$O(n)$</td>
-<td>$2n$</td>
-<td>$\approx 1$</td>
+<td>$\approx 4n$</td>
+<td>$8n$ B</td>
+<td>$\approx 0.5$</td>
 <td><strong>带宽受限</strong></td>
 </tr>
 <tr>
 <td>RoPE</td>
-<td>$O(n)$</td>
-<td>$2n$</td>
-<td>$\approx 1$</td>
+<td>$\approx 4n$</td>
+<td>$8n$ B</td>
+<td>$\approx 0.5$</td>
 <td><strong>带宽受限</strong></td>
 </tr>
 </tbody>
 </table>
-<p>在 <code>ch01</code> 实测（CPU）：$2048^3$ GEMM 的 AI ≈ 341，逐元素算子 AI ≈ 0.12 —— <strong>差 2800 倍</strong>。</p>
+<p>在 <code>ch01</code> 实测（CPU）：$2048^3$ GEMM 的 AI ≈ 341，逐元素算子 AI ≈ 0.12（就是那个 $1/8$）—— <strong>差 2800 倍</strong>。</p>
+<h3>5.1 峰值算力和带宽，分别取哪个精度？</h3>
+<p>这是算 roofline 时最容易搞混的一步：</p>
+<ul>
+<li><strong>峰值算力取「这个 kernel 实际跑在什么 dtype 上」的峰值。</strong> 用 BF16 做 GEMM 就用 BF16 Tensor Core 的 989.5 TFLOPS，不要拿 FP32 的 66.9 去比。</li>
+<li><strong>带宽跟精度无关。</strong> HBM 3.35 TB/s 是物理通道，<strong>单位就是 Byte/s</strong>，不存在"fp16 带宽"。低精度省的是<strong>字节数</strong>，不是带宽变宽——所以 FP8 通信时间减半，而不是通道翻倍。</li>
+<li><strong>分母要数这个实现真的搬了多少字节</strong>，不是"理论最少字节"（不融合时中间结果要写回 HBM 再读出来，见 CH02）。</li>
+</ul>
+<p>于是屋顶的<strong>拐点</strong>（machine balance）随 dtype 变（H100 SXM，dense 值）：</p>
+<table>
+<thead>
+<tr>
+<th>执行 dtype</th>
+<th>峰值算力</th>
+<th>带宽</th>
+<th>拐点 = 峰值/带宽</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32（CUDA core）</td>
+<td>66.9 TFLOPS</td>
+<td>3.35 TB/s</td>
+<td><strong>20</strong> FLOP/Byte</td>
+</tr>
+<tr>
+<td>BF16（Tensor Core）</td>
+<td>989.5 TFLOPS</td>
+<td>3.35 TB/s</td>
+<td><strong>295</strong></td>
+</tr>
+<tr>
+<td>FP8（Tensor Core）</td>
+<td>1979 TFLOPS</td>
+<td>3.35 TB/s</td>
+<td><strong>591</strong></td>
+</tr>
+</tbody>
+</table>
+<p>判断：<code>AI &gt; 拐点</code> → 计算受限；<code>AI &lt; 拐点</code> → 访存受限。</p>
+<p>同一个 $4096^3$ GEMM（FLOPs 恒为 $2\times4096^3=137.4$ GFLOP）在三套屋顶下：</p>
+<table>
+<thead>
+<tr>
+<th>执行精度</th>
+<th>搬运字节</th>
+<th>AI</th>
+<th>计算时间</th>
+<th>访存时间</th>
+<th>归属</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32 (CUDA core)</td>
+<td>201 MB</td>
+<td>683</td>
+<td>2054 µs</td>
+<td>60 µs</td>
+<td>计算受限（慢 30×）</td>
+</tr>
+<tr>
+<td>BF16</td>
+<td>101 MB</td>
+<td>1365</td>
+<td>139 µs</td>
+<td>30 µs</td>
+<td>计算受限 ✅</td>
+</tr>
+<tr>
+<td>FP8</td>
+<td>50 MB</td>
+<td>2731</td>
+<td>69 µs</td>
+<td>15 µs</td>
+<td>计算受限，又快 1×</td>
+</tr>
+</tbody>
+</table>
+<p><strong>注意方向</strong>：精度越低，峰值涨得比字节数降得快（BF16→FP8：字节 ÷2，峰值 ×2），所以拐点右移，<strong>越容易撞上算力天花板</strong>——小形状 GEMM 在低精度下反而更容易变成访存受限。</p>
+<blockquote>
+<p>⚠️ 三个坑：① 规格表上的大数字常是 2:1 <strong>稀疏</strong>值（H100 BF16 常被写成 1979，dense 是 989.5），算 roofline 一律用 dense；
+② 除了 HBM 还有 SRAM/L2 这条带宽高一个数量级的屋顶，FlashAttention 就是把数据留在 SRAM 从而换到那条屋顶上（CH05）；
+③ Tensor Core 峰值要求形状/地址对齐，达不到会打折，roofline 给的是上界。</p>
+</blockquote>
 <p><strong>推论（贯穿全书）</strong>：</p>
 <ol>
 <li>GEMM 已经是"好算子"，别去优化它的 FLOPs，要去<strong>减少非 GEMM 的访存次数</strong>；</li>
@@ -630,6 +742,12 @@ def demo_arithmetic_intensity():
           f&quot;{flops_e/t_elt/1e9*1e3:7.2f} GFLOP/s  算术强度={ai_elt:7.2f} FLOP/Byte&quot;)
     print(&quot;  结论：GEMM 算术强度高 → 算力受限（好）；逐元素/softmax/归一化 → 带宽受限（坏）。&quot;)
     print(&quot;  Softmax、RMSNorm、RoPE、激活函数都属于后者，所以优化方向是【融合 kernel】。&quot;)
+    print(&quot;  ── 三笔账别混 ──────────────────────────────────────────&quot;)
+    print(f&quot;  FLOPs 与 dtype 无关（{N}³ GEMM 恒为 2MNK={flops/1e9:.1f} GFLOP，换精度也不变）&quot;)
+    print(f&quot;  Bytes = 元素数 × 字节宽：本例 fp32={bytes_gemm/1e6:.1f} MB（fp16 减半，fp8 再减半）&quot;)
+    print(&quot;  峰值算力才随 dtype 变：H100 dense → FP32 66.9 / BF16 989.5 / FP8 1979 TFLOPS&quot;)
+    print(&quot;  带宽与精度无关：HBM 3.35 TB/s 就是 Byte/s，低精度省的是字节数不是带宽&quot;)
+    print(&quot;  → 屋顶拐点 = 峰值/带宽 = FP32 20 / BF16 295 / FP8 591 FLOP/Byte；AI 超过它才算算力受限&quot;)
 
 
 def demo_tiling_effect():

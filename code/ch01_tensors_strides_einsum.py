@@ -144,6 +144,12 @@ def demo_arithmetic_intensity():
           f"{flops_e/t_elt/1e9*1e3:7.2f} GFLOP/s  算术强度={ai_elt:7.2f} FLOP/Byte")
     print("  结论：GEMM 算术强度高 → 算力受限（好）；逐元素/softmax/归一化 → 带宽受限（坏）。")
     print("  Softmax、RMSNorm、RoPE、激活函数都属于后者，所以优化方向是【融合 kernel】。")
+    print("  ── 三笔账别混 ──────────────────────────────────────────")
+    print(f"  FLOPs 与 dtype 无关（{N}³ GEMM 恒为 2MNK={flops/1e9:.1f} GFLOP，换精度也不变）")
+    print(f"  Bytes = 元素数 × 字节宽：本例 fp32={bytes_gemm/1e6:.1f} MB（fp16 减半，fp8 再减半）")
+    print("  峰值算力才随 dtype 变：H100 dense → FP32 66.9 / BF16 989.5 / FP8 1979 TFLOPS")
+    print("  带宽与精度无关：HBM 3.35 TB/s 就是 Byte/s，低精度省的是字节数不是带宽")
+    print("  → 屋顶拐点 = 峰值/带宽 = FP32 20 / BF16 295 / FP8 591 FLOP/Byte；AI 超过它才算算力受限")
 
 
 def demo_tiling_effect():
