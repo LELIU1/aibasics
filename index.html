@@ -315,44 +315,68 @@ A.T.data_ptr() == A.data_ptr()   # True —— 共享内存！
 这个区别是 CH05→CH07 全部优化的总纲。</p>
 </blockquote>
 <h2>4. 广播的代价：隐式的外积</h2>
-<p>PyTorch 的广播（broadcasting）写成 <code>q[:, :, None, :] - k[:, None, :, :]</code>，
-结果是形状 $(B, H, N, N, D)$ 的<strong>中间张量</strong>——它把每一对 $(n,m)$ 的差向量都物化了。</p>
+<p><strong>广播本身是免费的</strong>：插入长度为 1 的维度只是把对应 stride 改成 0，是视图，不搬数据。
+但一旦对两个<strong>互补拉伸</strong>的张量做逐元素运算，结果必须被<strong>真实写出来</strong>：</p>
+<pre><code class="language-python">q, k: (B, H, N, D)
+q[:, :, :, None, :]    # (B,H,N,1,D)   stride 里 N 维被拉伸（重复 stride）
+k[:, :, None, :, :]    # (B,H,1,N,D)
+q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
+</code></pre>
+<p>结果的 stride 里不再有 0，说明 $N^2$ 个 $(n,m)$ 对的<strong>差向量</strong>每一条都被物化了：</p>
 <p>$$ \text{字节数} = B\cdot H\cdot N^2 \cdot D \cdot 4\ \text{(fp32)} $$</p>
-<p>实测（fp32，单头）：</p>
+<blockquote>
+<p>⚠️ <strong>常见索引错误</strong>：写成 <code>q[:, :, None, :] - k[:, None, :, :]</code> 得到的是 $(B,H,H,N,D)$——
+它在算"第 $h$ 个 q 头 vs 第 $h'$ 个 k 头"的交叉，通常不是你要的东西。
+想表达"第 $n$ 个 token vs 第 $m$ 个 token"，<code>None</code> 必须插在 <strong>N 之后</strong>（<code>[:, :, :, None, :]</code>）。</p>
+</blockquote>
+<h3>数字是怎么算出来的</h3>
+<p>fp32 下一个元素 4 字节；单头 $B=H=1$，所以元素数就是 $N^2D$：</p>
 <table>
 <thead>
 <tr>
-<th>$N, d$</th>
+<th>$N,d$</th>
+<th>元素数 $N^2D$</th>
 <th>广播中间张量</th>
-<th>注意力矩阵本身</th>
+<th>分数矩阵 $N^2$ 个标量</th>
 <th>倍数</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td>4096, 64</td>
-<td><strong>4.29 GB</strong></td>
+<td>$4096^2\times64 = 1.07\times10^9$</td>
+<td>$1.07\times10^9\times4\text{B} =$ <strong>4.29 GB</strong></td>
 <td>67.1 MB</td>
-<td>64×</td>
+<td><strong>64×</strong></td>
 </tr>
 <tr>
 <td>8192, 128</td>
+<td>$8192^2\times128 = 8.59\times10^9$</td>
 <td><strong>34.36 GB</strong></td>
 <td>268.4 MB</td>
-<td>128×</td>
+<td><strong>128×</strong></td>
 </tr>
 <tr>
 <td>32768, 128</td>
+<td>$32768^2\times128 = 1.37\times10^{11}$</td>
 <td><strong>549.76 GB</strong></td>
 <td>4295.0 MB</td>
-<td>128×</td>
+<td><strong>128×</strong></td>
 </tr>
 </tbody>
 </table>
-<p>再乘上 batch 和头数就是天文数字。第一次写的人基本都会 OOM。
-（本教程 <code>ch01</code> 第 3 节故意先用"账面记账"演示这个数量级，再用<strong>分块</strong>真实跑一遍——
-实测分块后峰值 67.1 MB vs 一次性 536.9 MB，<strong>省 8× 且结果完全一致</strong>。这个 OOM 本身就是最重要的一课。）</p>
-<p>对比：</p>
+<p><strong>倍数恰好等于 $d$</strong>，跟序列长度无关：</p>
+<p>$$ \frac{N^2 D\cdot 4}{N^2\cdot 4} = D $$</p>
+<p>第一行是 64× 只因为那一行的 $d=64$。长序列让两个数字<strong>一起</strong>变大，比值不动。</p>
+<h3>一个重要澄清</h3>
+<p>标准 softmax attention <strong>根本不会写 <code>q - k</code></strong>（那是欧氏距离注意力 / 相对位置编码的写法）。
+它用 <code>einsum("bhnd,bhmd-&gt;bhnm")</code> 把 $d$ 直接<strong>收缩掉</strong>，峰值只有 $N^2$ 个标量
+（$N{=}4096$ 时 = 67.1 MB）。所以：</p>
+<ul>
+<li><strong>4.29 GB</strong> 是「在 pairwise 运算上滥用逐元素广播」的代价，真实踩坑场景是相对位置编码、距离注意力、手写 pairwise 特征；</li>
+<li><strong>67.1 MB</strong> 才是标准 attention 的分数矩阵——而 $N{=}32768$ 时它已经涨到 4.3 GB，再乘 $B\cdot H$ 直接爆掉。</li>
+</ul>
+<p><strong>$N^2$ 本身就是内存墙，这才是 CH05 FlashAttention 要解决的对象</strong>（分块降到 $O(N)$）。</p>
 <table>
 <thead>
 <tr>
@@ -363,22 +387,25 @@ A.T.data_ptr() == A.data_ptr()   # True —— 共享内存！
 </thead>
 <tbody>
 <tr>
-<td><code>q[:,:,None,:] - k[:,None,:,:]</code> 后逐元素算</td>
+<td><code>q5 - k5</code> 再逐元素算</td>
 <td>$O(BHN^2D)$</td>
-<td>❌ 炸内存</td>
+<td>❌ 炸内存（pairwise 广播踩坑）</td>
 </tr>
 <tr>
-<td><code>torch.cdist</code> / <code>einsum</code> 后展开</td>
+<td><code>einsum</code>/<code>matmul</code> 收缩 $d$</td>
 <td>$O(BHN^2)$</td>
-<td>✅ 只存标量分数</td>
+<td>⚠️ 标准 attention，仍是 $O(N^2)$</td>
 </tr>
 <tr>
 <td>分块（chunk）循环</td>
-<td>$O(BH\,b^2 D)$</td>
+<td>$O(BH\,b^2)$</td>
 <td>✅ FlashAttention 的思路</td>
 </tr>
 </tbody>
 </table>
+<p>实测（<code>ch01</code> 第 3 节，$N{=}2048,d{=}32,\text{chunk}{=}256$）：一次性广播峰值 536.9 MB，
+分块后 67.1 MB，<strong>省 8×（= $N/\text{chunk}$）且数值完全一致</strong>。
+（这里的 67.1 MB 和上面表格里的 67.1 MB 纯属数字巧合，不是同一个量。）</p>
 <h2>5. 算术强度与 Roofline</h2>
 <p><strong>算术强度（Arithmetic Intensity, AI）</strong>：</p>
 <p>$$ \mathrm{AI} = \frac{\text{FLOPs}}{\text{Bytes moved}} \quad [\text{FLOP/Byte}] $$</p>
@@ -555,11 +582,15 @@ def demo_broadcast():
     &quot;&quot;&quot;3. 广播 = 隐式外积。代价：中间张量被真实展开到内存&quot;&quot;&quot;
     section(&quot;3. 广播的内存代价（为什么 FlashAttention 要避免它）&quot;)
     # 真实规模：只算账，不真的分配（否则 OOM —— 这恰恰是重点）
+    print(&quot;  注：单头 B=H=1；fp32 每元素 4 字节。中间张量 = N²·D 个数，分数矩阵 = N² 个标量&quot;)
     for N, d in [(4096, 64), (8192, 128), (32768, 128)]:
-        temp = N * N * d * 4 / 1e9
-        score = N * N * 4 / 1e6
+        temp = N * N * d * 4 / 1e9          # N²·D·4 字节
+        score = N * N * 4 / 1e6             # N²·4 字节
         print(f&quot;  seq={N:&gt;6d}, d={d:&gt;3d}: 广播中间张量 {temp:8.2f} GB, &quot;
-              f&quot;注意力矩阵本身 {score:8.1f} MB  → 中间/结果 = {temp*1e9/(score*1e6):.0f}x&quot;)
+              f&quot;分数矩阵 {score:8.1f} MB  → 倍数 = {temp*1e9/(score*1e6):.0f}x（恰好 = d，与 N 无关）&quot;)
+    print(&quot;  ⚠ 标准 softmax attention 不写 q-k 差：它用 einsum 把 d 收缩掉，峰值只有 N² 个标量。&quot;)
+    print(&quot;    4.29 GB 是「pairwise 运算滥用逐元素广播」的代价（相对位置编码 / 距离注意力会踩）。&quot;)
+    print(&quot;    但 N² 本身也是墙：N=32768 单头就 4.3 GB，乘 B·H 就爆 —— 这才是 CH05 要解决的。&quot;)
 
     # 小规模实测：证明它真的会 materialize（用 chunk 方式避免，对比内存峰值）
     N, d, CH = 2048, 32, 256
@@ -4967,7 +4998,7 @@ if __name__ == &quot;__main__&quot;:
     <header class="ch-head"><span class="ch-num">README</span><h2>目录、运行方式与学习路线</h2></header>
     <div class="pane pane-doc active"><p>一份<strong>用 PyTorch 代码驱动</strong>的线性代数教程：把 FlashAttention、GatedDeltaNet、RoPE、GroupGEMM、DeepEP
 这些大模型核心技术背后的<strong>线性代数结构</strong>拆开讲清楚，每一章都配一份<strong>可以直接跑、自带数值断言</strong>的用例。</p>
-<pre><code>llm-linalg/
+<pre><code>aibasics/
 ├── README.md              本文件（章节地图 + 运行方式）
 ├── index.html             单文件交互式教程站（打开即用，含 MathJax 公式渲染）
 ├── code/
@@ -4988,7 +5019,7 @@ if __name__ == &quot;__main__&quot;:
     ├── ch01_tensors_strides_einsum.md   ...  ch11_distributed_and_capstone.md
 </code></pre>
 <h2>快速开始</h2>
-<pre><code class="language-bash">cd llm-linalg/code
+<pre><code class="language-bash">cd code
 python ch05_flash_attention.py          # 跑单章
 python run_all.py                       # 跑全部 11 章（约 40 秒）
 python run_all.py 3 5 7                 # 只跑第 3/5/7 章

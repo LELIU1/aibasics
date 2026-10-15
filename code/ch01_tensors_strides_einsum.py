@@ -96,11 +96,15 @@ def demo_broadcast():
     """3. 广播 = 隐式外积。代价：中间张量被真实展开到内存"""
     section("3. 广播的内存代价（为什么 FlashAttention 要避免它）")
     # 真实规模：只算账，不真的分配（否则 OOM —— 这恰恰是重点）
+    print("  注：单头 B=H=1；fp32 每元素 4 字节。中间张量 = N²·D 个数，分数矩阵 = N² 个标量")
     for N, d in [(4096, 64), (8192, 128), (32768, 128)]:
-        temp = N * N * d * 4 / 1e9
-        score = N * N * 4 / 1e6
+        temp = N * N * d * 4 / 1e9          # N²·D·4 字节
+        score = N * N * 4 / 1e6             # N²·4 字节
         print(f"  seq={N:>6d}, d={d:>3d}: 广播中间张量 {temp:8.2f} GB, "
-              f"注意力矩阵本身 {score:8.1f} MB  → 中间/结果 = {temp*1e9/(score*1e6):.0f}x")
+              f"分数矩阵 {score:8.1f} MB  → 倍数 = {temp*1e9/(score*1e6):.0f}x（恰好 = d，与 N 无关）")
+    print("  ⚠ 标准 softmax attention 不写 q-k 差：它用 einsum 把 d 收缩掉，峰值只有 N² 个标量。")
+    print("    4.29 GB 是「pairwise 运算滥用逐元素广播」的代价（相对位置编码 / 距离注意力会踩）。")
+    print("    但 N² 本身也是墙：N=32768 单头就 4.3 GB，乘 B·H 就爆 —— 这才是 CH05 要解决的。")
 
     # 小规模实测：证明它真的会 materialize（用 chunk 方式避免，对比内存峰值）
     N, d, CH = 2048, 32, 256
