@@ -889,10 +889,55 @@ if __name__ == &quot;__main__&quot;:
 <p>矩阵乘法满足结合律 $(AB)C = A(BC)$，但<strong>不满足交换律</strong>。
 FLOPs 却强烈依赖于括号位置：</p>
 <p>$$ (M\times K)\cdot(K\times N)\cdot(N\times P) $$</p>
-<ul>
-<li>$(AB)C$：$2MKN + 2MK\cdots$ 具体为 $2MKN + 2MNP$</li>
-<li>$A(BC)$：$2KNP + 2MK\cdots$ 具体为 $2KNP + 2MK$</li>
-</ul>
+<p>分两步算，每步 = $2 \times \text{行} \times \text{列} \times \text{缩并维}$：</p>
+<table>
+<thead>
+<tr>
+<th>顺序</th>
+<th>第一步</th>
+<th>第二步</th>
+<th>合计 FLOPs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$(AB)C$</td>
+<td>$AB\in\mathbb{R}^{M\times N}$：$2MKN$</td>
+<td>$(AB)C\in\mathbb{R}^{M\times P}$：$2MNP$</td>
+<td>$2MKN + 2MNP$</td>
+</tr>
+<tr>
+<td>$A(BC)$</td>
+<td>$BC\in\mathbb{R}^{K\times P}$：$2KNP$</td>
+<td>$A(BC)\in\mathbb{R}^{M\times P}$：$2MKP$</td>
+<td>$2KNP + 2MKP$</td>
+</tr>
+</tbody>
+</table>
+<p>⚠️ 两者<strong>输出形状都是 $M\times P$</strong>，数值完全一样（结合律），但 FLOPs 差很多。</p>
+<p>设 $M=K=P=64$、$N=4096$（长序列场景）：</p>
+<table>
+<thead>
+<tr>
+<th>顺序</th>
+<th>算式</th>
+<th>合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>$(AB)C$</td>
+<td>$2!\cdot!64!\cdot!64!\cdot!4096 + 2!\cdot!64!\cdot!4096!\cdot!64$</td>
+<td>$33.5\text{M} + 33.5\text{M} = \mathbf{67.1\text{M}}$</td>
+</tr>
+<tr>
+<td>$A(BC)$</td>
+<td>$2!\cdot!64!\cdot!4096!\cdot!64 + 2!\cdot!64!\cdot!64!\cdot!64$</td>
+<td>$33.5\text{M} + 0.52\text{M} = \mathbf{34.0\text{M}}$</td>
+</tr>
+</tbody>
+</table>
+<p>$A(BC)$ 之所以省，是<strong>把大的 $K\times N$ 先收缩成小的 $K\times P$</strong>，后面那步工作量直接掉两个量级。</p>
 <p>若 $N \gg M,P$（长序列），两者相差巨大。</p>
 <h3>案例 A：LoRA 的权重合并</h3>
 <p>$$ y = x W + x\cdot \frac{\alpha}{r} B A = x\left(W + \frac{\alpha}{r}BA\right) $$</p>

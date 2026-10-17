@@ -39,8 +39,23 @@ FLOPs 却强烈依赖于括号位置：
 
 $$ (M\times K)\cdot(K\times N)\cdot(N\times P) $$
 
-- $(AB)C$：$2MKN + 2MK\cdots$ 具体为 $2MKN + 2MNP$
-- $A(BC)$：$2KNP + 2MK\cdots$ 具体为 $2KNP + 2MK$
+分两步算，每步 = $2 \times \text{行} \times \text{列} \times \text{缩并维}$：
+
+| 顺序 | 第一步 | 第二步 | 合计 FLOPs |
+|---|---|---|---|
+| $(AB)C$ | $AB\in\mathbb{R}^{M\times N}$：$2MKN$ | $(AB)C\in\mathbb{R}^{M\times P}$：$2MNP$ | $2MKN + 2MNP$ |
+| $A(BC)$ | $BC\in\mathbb{R}^{K\times P}$：$2KNP$ | $A(BC)\in\mathbb{R}^{M\times P}$：$2MKP$ | $2KNP + 2MKP$ |
+
+⚠️ 两者**输出形状都是 $M\times P$**，数值完全一样（结合律），但 FLOPs 差很多。
+
+设 $M=K=P=64$、$N=4096$（长序列场景）：
+
+| 顺序 | 算式 | 合计 |
+|---|---|---|
+| $(AB)C$ | $2\!\cdot\!64\!\cdot\!64\!\cdot\!4096 + 2\!\cdot\!64\!\cdot\!4096\!\cdot\!64$ | $33.5\text{M} + 33.5\text{M} = \mathbf{67.1\text{M}}$ |
+| $A(BC)$ | $2\!\cdot\!64\!\cdot\!4096\!\cdot\!64 + 2\!\cdot\!64\!\cdot\!64\!\cdot\!64$ | $33.5\text{M} + 0.52\text{M} = \mathbf{34.0\text{M}}$ |
+
+$A(BC)$ 之所以省，是**把大的 $K\times N$ 先收缩成小的 $K\times P$**，后面那步工作量直接掉两个量级。
 
 若 $N \gg M,P$（长序列），两者相差巨大。
 
