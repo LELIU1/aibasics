@@ -13,7 +13,18 @@ $$ y_t = \sum_{i \in \mathrm{TopK}(x_t)} g_i(x_t)\, E_i(x_t) $$
 
 $$ \boxed{Y = P^\top\, \mathrm{blkdiag}\big(E_0, E_1, \dots, E_{E-1}\big)\, P\, X} $$
 
-其中 $P$ 是路由决定的**置换矩阵**（每行每列恰一个 1）。拆开看：
+其中 $P$ 是路由决定的**置换矩阵**（每行每列恰一个 1）。
+
+> **这个式子是结构示意，逐字读会有两处形状对不上**：
+> ① topk 后每个 token 要复制 $k$ 份，所以 $P$ 实际作用在 $T\cdot k$ 行上（代码里
+> `x.unsqueeze(1).expand(T, topk, d).reshape(T*topk, d)`），不是 $T$ 行；
+> ② $\mathrm{blkdiag}(E_e)$ 只有当每个专家恰好分到 1 个 token 时才是标准的 $(Ed)\times(Ed)$ 矩阵，
+> 各专家块高 $n_e$ 不等时它是"块高不等的分块对角算子"。要写成单个矩阵乘，
+> 得先把 $X$ 复制 $E$ 份并用 one-hot 掩码只留自己专家那一段（代码 `moe_blockdiag` 的
+> `Xext` 形状 $(T, E\cdot d)$ 就是这么来的）。
+> 忽略这两点，把它当成"重排 → 各块各算各的 → 还原"的紧凑写法即可。
+
+拆开看：
 
 | 步骤 | 数学 | 工程 |
 |---|---|---|
@@ -43,7 +54,7 @@ for e in range(E):
 ### (b) `moe_grouped`：排序 + GroupGEMM
 
 ```python
-order   = torch.argsort(expert_id)            # 稳定排序，同专家聚在一起
+order   = torch.argsort(expert_id)            # 同专家聚在一起（不保证稳定，见下）
 counts  = torch.bincount(expert_id, minlength=E)
 offsets = torch.cumsum(counts) - counts       # 每个专家块的起始位置
 xs      = x[order]                            # 重排后的输入（连续！）
@@ -51,17 +62,25 @@ xs      = x[order]                            # 重排后的输入（连续！�
 ```
 
 - 优点：输入连续，能用上高效 GEMM；kernel 数量可控（甚至可以打包成一个 kernel）；
-- 关键：`order` 是**稳定排序**（`argsort` 对相同 key 保持原顺序），所以反置换 `argsort(order)` 能还原。
+- 关键：`order` 是 `flat_id.argsort()`，反置换就是 `argsort(order)`（见 §5）。
+
+> ⚠️ 别把这件事归功于"稳定排序"：`torch.argsort` **默认 `stable=False`**，
+> 相同 `expert_id` 的 token 之间不保证保持原顺序（实测 `ids.argsort() != ids.argsort(stable=True)`）。
+> 而 `argsort(order)` 是 `order` 的逆置换这件事与稳定性**无关**——对任意置换都成立，
+> 因为 `order[argsort(order)[i]] = i` 恒成立。稳定排序只影响组内顺序是否"好看"，不影响正确性。
 
 > ⚠️ 踩过的坑：路由权重 $g$ 必须跟着一起重排（或按 `order` 索引）。
-> 写成 `flat_w[order]` 才对；漏掉这一步会得到 `max|Δ| = 3.4e-01`（看起来"差不多"但其实是错的）。
+> 写成 `flat_w[order]` 才对；漏掉这一步会拿到 `max|Δ| = 3.371e-01`
+> （实测值；参考输出的量级是 $5.6\times10^{-1}$，所以它是"看着差不多、其实全错"）。
 
 ### (c) `moe_blockdiag`：显式块对角
 
 把 $\mathrm{blkdiag}(E_0,\dots,E_{E-1})$ 真的构造出来（或用 one-hot mask 索引），
 一次大矩阵乘。适合**教学理解**，实际不用（因为块对角矩阵是 $Ed \times Ed$ 的巨大稀疏矩阵）。
 
-`ch08` 验证三者数值一致（`max|Δ| = 0`）。
+`ch08` 验证三者数值一致：`moe_loop` vs `moe_grouped` 的 `max|Δ| = 0.000e+00`（逐位相同），
+`moe_loop` vs `moe_blockdiag` 的 `max|Δ| = 1.788e-07`（块对角版走的是另一条浮点求和路径，
+只有舍入级差异）。
 
 ## 3. Padding vs Ragged：GroupGEMM 的两个流派
 
@@ -72,18 +91,24 @@ xs      = x[order]                            # 重排后的输入（连续！�
 | **Padded** | 所有块补齐到 $M_{\max}$（或对齐到 8/16/64 的倍数），填 0 | $(M_{\max} - \bar M)/\bar M$ |
 | **Ragged** | 用 offsets 描述变长，kernel 内部按 ragged 索引 | 0，但 kernel 复杂 |
 
-`ch08` 实测（专家块大小 $[135, 129, 122, 126]$，即均衡时）：
+`ch08` 的 `demo_padding_waste` 测得的是**负载不均**带来的浪费
+（$E{=}64$，平均每专家 256 个 token，所有块补齐到最大块 $M_{\max}$）：
 
-| 对齐粒度 | padding 浪费 |
-|---|---|
-| 无对齐 | 0% |
-| 对齐到 128 的倍数 | 32.1% |
-| 对齐到 256 的倍数 | 65.7% |
-| 对齐到 512 的倍数 | 100.2% |
+| 负载不均衡度 | 实际 token | padding 后 | 浪费 $(M_{\max}-\bar M)/\bar M$ | 最大块 / 最小块 |
+|---|---|---|---|---|
+| 0.0（完全均衡） | 16384 | 16384 | 0.0% | 256 / 256 |
+| 0.3 | 16088 | 21248 | 32.1% | 332 / 183 |
+| 0.6 | 15801 | 26176 | 65.7% | 409 / 109 |
+| 0.9 | 15507 | 31040 | 100.2% | 485 / 36 |
 
-**结论**：对齐粒度是把双刃剑——tensor core 要求 $M$ 是 8/16 的倍数才高效，
-但粒度太大会浪费一半以上算力。工程上一般取 **$M$ 对齐到 64 或 128**，
-或者用 ragged kernel（如 DeepGEMM 的做法）。
+注意这一栏是"补齐到最大块"的账，**不是**对齐粒度——两者是独立的两层开销。
+对齐那一层可以用 §1 那组块大小 $[135,129,122,126]$（总 512）单独算：
+补齐到最大块 135 只浪费 $540/512-1 = 5.5\%$，但对齐到 128 的倍数要浪费 $768/512-1 = 50\%$
+（对齐到 64 是 25%，对齐到 256 是 100%）。
+
+**结论**：负载越不均，padding 浪费越大（不均衡度 0.9 时算力直接翻倍）；
+对齐粒度又是另一把双刃剑——tensor core 要求 $M$ 取 8/16/64 的倍数才高效，但粒度太大会再吃掉一半。
+工程上一般取 **$M$ 对齐到 64 或 128**，或者用 ragged kernel（如 DeepGEMM 的做法）把两层都省掉。
 
 ## 4. 负载均衡的辅助损失
 

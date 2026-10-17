@@ -169,14 +169,14 @@ def demo_mla():
     mla_c = d_c + d_r
     for name, v_ in [("MHA (8 头)", mha), ("GQA (2 组)", gqa4), ("MQA (1 头)", mqa), ("MLA", mla_c)]:
         print(f"    {name:<14}: {v_:>6d} 维/token   相对 MHA 省 {mha/v_:>5.1f}x")
-    print("\n  真实规模对照（DeepSeek-V2 级别: H=128, d_h=128, d_c=512, d_r=64）:")
+    print("\n  真实规模对照（DeepSeek-V3 级别: H=128, d_h=128, d_c=512, d_r=64）:")
     mha_big, mla_big = 2 * 128 * 128, 512 + 64
     print(f"    MHA: {mha_big} 维/token → MLA: {mla_big} 维/token，省 {mha_big/mla_big:.1f}x"
           f"（且 MLA 的表达力还更强，因为 latent 是各头共享的高秩压缩）")
     print("  → MLA 把 KV 压到 latent，推理时靠【矩阵吸收】直接用 latent 计算，不需要展开回 H·d_h")
     print("  → 吸收的两个恒等式（都是结合律）：")
     print("     score: (W_UQ c_q)ᵀ(W_UK c_kv) = c_qᵀ (W_UQᵀ W_UK) c_kv      ← 预计算 (d_cq × d_c)")
-    print("     out  : Σ_h W_O_h A_h (W_UV_h c_kv) = Σ_h (A_h c_kv)(W_UV_h W_O_h) ← 结合律换序")
+    print("     out  : Σ_h (A_h W_UV_h c_kv) W_O_h = Σ_h (A_h c_kv)(W_UV_h W_O_h) ← 结合律换序")
     print("  → 代价：RoPE 不能进 latent（位置信息会被低秩抹掉），所以要额外解耦 d_r 维")
 
 
@@ -203,7 +203,7 @@ def demo_quant_weights():
         errs = [((x @ Wi.T - ref).norm() / ref.norm()).item() * 100 for Wi in row]
         print(f"    {bits:>5} {errs[0]:>21.3f}% {errs[1]:>13.3f}% {errs[2]:>13.3f}%")
     print("  → 均匀量化的理论误差 ≈ (step/√12)/σ，step = 2·amax/(2^b-1)：")
-    print("     对高斯权重 INT8 ≈ 1%，INT4 ≈ 10% —— 光靠均匀量化 INT4 是不够的")
+    print("     对高斯权重（amax ≈ 4.76σ）INT8 ≈ 1%，INT4 ≈ 18% —— 光靠均匀量化 INT4 是不够的")
     print("  → 真实模型能跑 INT4/INT2，靠的是把目标从 ‖W-Ŵ‖ 换成【加权】目标：")
     print("     GPTQ/AWQ:  min ‖(W-Ŵ)X‖²_F  ≈  min Σ_j H_jj (W_j - Ŵ_j)²   (H = XᵀX 的 Hessian)")
     print("     即：重要的权重（对应激活方差大的通道）量化得更精细，不重要的可以更粗")

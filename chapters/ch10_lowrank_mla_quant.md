@@ -18,7 +18,7 @@ $$ A_r = \sum_{i=1}^r \sigma_i u_i v_i^\top = U_r \Sigma_r V_r^\top $$
 
 $$ \eta(r) = \frac{\sum_{i\le r}\sigma_i^2}{\sum_i \sigma_i^2} $$
 
-`ch10` 第 1 节构造一个谱按 $\exp(-i/6)$ 衰减的矩阵，实测截断 SVD 的误差
+`ch10` 第 1 节构造一个谱按 $(i+1)^{-1.2}$ 衰减的矩阵，实测截断 SVD 的误差
 与 $\sqrt{\sum_{i>r}\sigma_i^2}$ 吻合（`max|Δ| ≈ 1.2e-07`）。
 
 ### LoRA 的秩怎么选
@@ -29,11 +29,11 @@ LoRA 假设微调的更新 $\Delta W$ 是低秩的：$\Delta W = BA$，$B\in\mat
 - $r$ 太大 → 参数量与全量微调接近，失去意义。
 
 经验法则：**看 $\Delta W$ 的谱衰减速度**。如果前 $r$ 个奇异值就吃掉 90% 能量，
-$r$ 就够了。`ch10` 第 2 节用真实谱衰减（指数衰减 vs 均匀谱）对比了不同 $r$ 的逼近误差。
+$r$ 就够了。`ch10` 第 2 节构造了一个谱按 $\exp(-i/6)$ 指数衰减的 $\Delta W$，对比不同 $r$ 的逼近误差。
 
 > 注意：要评估的是 **$\Delta W$ 的谱**，不是 $W$ 的谱！
 > 预训练权重 $W$ 的谱通常很"平"（信息均匀分布），而 $\Delta W$ 的谱往往很"尖"。
-> `ch10` 里特意对比了"重建整个 $W$"和"重建 $\Delta W$"两种误差。
+> `ch10` 第 2 节低秩重建的对象就是 $\Delta W$（误差按"增量对输出的影响"统计）。
 
 ## 2. MLA：多层注意力 = 把 KV 压进一个低秩潜向量
 
@@ -50,13 +50,15 @@ $$ c_{KV} = x W_{DKV}\quad (\text{下投影到 } d_c),\qquad
 QK 方向：
 
 $$ q^{(h)\top} k^{(h)} = \big(W_{UQ}^{(h)} c_q\big)^\top \big(W_{UK}^{(h)} c_{KV}\big)
-= c_q^\top \underbrace{\big(W_{UQ}^{(h)\top} W_{UK}^{(h)}\big)}_{\text{预先合并成一个 } d_c\times d_c} c_{KV} $$
+= c_q^\top \underbrace{\big(W_{UQ}^{(h)\top} W_{UK}^{(h)}\big)}_{\text{预先合并成一个 } d_{cq}\times d_c} c_{KV} $$
 
 把两个矩阵**预先乘好**，推理时直接用合并矩阵 —— 省掉一次投影。
+（形状：$W_{UQ}^{(h)}:d_{cq}\to d_h$、$W_{UK}^{(h)}:d_c\to d_h$，故合并结果是 $d_{cq}\times d_c$；
+DeepSeek-V3 的 $d_{cq}{=}1536,\ d_c{=}512$，即 $1536\times512$，代码里是 `(H, d_cq, d_c)`。）
 
 输出方向（更妙）：
 
-$$ \sum_h W_O^{(h)}\, A^{(h)}\, \big(W_{UV}^{(h)} c_{KV}\big)
+$$ \sum_h \big(A^{(h)}\, W_{UV}^{(h)}\, c_{KV}\big)\, W_O^{(h)}
 = \sum_h \big(A^{(h)} c_{KV}\big)\underbrace{\big(W_{UV}^{(h)} W_O^{(h)}\big)}_{\text{合并}} $$
 
 注意 $A^{(h)}$ 是 $N\times N$ 的注意力矩阵，这一步把"先投影 V 再乘 $W_O$"
@@ -79,13 +81,14 @@ $$ q = [\underbrace{q^{C}}_{\text{可压缩部分}},\ \underbrace{q^{R}}_{\text{
 k = [k^{C},\ k^{R}] $$
 
 - $q^C, k^C$ 走低秩潜向量（可吸收、可压缩）；
-- $q^R, k^R$（$d_r = 64$ 维）单独做 RoPE，**每个头都要缓存**。
+- $q^R$ 是查询侧（不必缓存）；$k^R$（$d_r = 64$ 维）单独做 RoPE，**且各头共享一份**
+  （代码里 `W_KR: d_model → d_r`，与头数无关）。
 
-所以 MLA 的 KV Cache = $d_c + d_r$ per token，而不是 $2\cdot H\cdot D$。
+所以 MLA 的 KV Cache = $d_c + d_r$ per token（只多一个 $d_r$），而不是 $2\cdot H\cdot D$。
 
 ### KV Cache 对比
 
-`ch10` 实测（$H{=}8, D{=}64, d_c{=}32, d_r{=}16$，教学用小模型）：
+`ch10` 实测（$H{=}8, d_h{=}32, d_c{=}64, d_r{=}32$，教学用小模型）：
 
 | 方法 | 每 token 缓存元素数 |
 |---|---|
@@ -125,7 +128,8 @@ $$ \hat w = s\cdot\big(\mathrm{clamp}(\mathrm{round}(w/s) + z,\ -2^{b-1},\ 2^{b-
 两个观察：
 
 1. **均匀量化的理论误差** $\approx \dfrac{\mathrm{step}/\sqrt{12}}{\sigma}$，$\mathrm{step} = \dfrac{2\,\mathrm{amax}}{2^b-1}$。
-   对高斯权重，INT8 ≈ 1%，INT4 ≈ 10% —— 和实测吻合。
+   对高斯权重（$\mathrm{amax}\approx4.76\sigma$），INT8 ≈ 1%，INT4 ≈ 18.3%（≈16%~19%）—— 与实测的
+   1.080% / 19.586% 吻合。
 2. **光靠均匀量化，INT4 的 19.6% 是完全不能用的**。
    真实模型能跑 INT4 甚至 INT2，靠的是把目标从 $\lVert W-\hat W\rVert_F$ 换掉（见下节）。
 3. group 越小误差越低，但 scale 的存储和访存开销越大 —— 实践中 group=32/64/128 是常见折中。
@@ -147,8 +151,8 @@ $$ \min_{\hat W}\ \big(W - \hat W\big)^\top H \big(W - \hat W\big) $$
 - **AWQ** 据此对重要通道乘一个放大系数 $s$（再在别处除回来），等效于给它们更多"量化级数"；
 - **GPTQ** 则是逐个量化权重，并把当前权重的量化误差**按 $H^{-1}$ 分配到后面的未量化权重**上（OBQ 的加速版）。
 
-`ch10` 用对角 Hessian 的加权目标演示了这一点：同样位宽下，Hessian 加权的目标
-在"模型输出误差"上明显优于普通 Frobenius 目标。
+> 注：`ch10` 第 4 节只把上面的加权目标写成了说明文字，并未实现对比实验
+> —— 实现"对角 Hessian 加权量化 vs 普通 Frobenius 量化"留作练习（见练习 5）。
 
 ## 4. 三个技巧的关系
 

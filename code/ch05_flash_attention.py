@@ -124,7 +124,6 @@ def demo_flash_correctness():
                 return
 
     # 检验极端数值（1000 量级 logits，朴素实现会溢出）
-    S_big = torch.randn(256, 256) * 1000
     Q2, K2 = torch.randn(256, 64), torch.randn(256, 64)
     o_n, _ = naive_attention(Q2 * 50, K2 * 50, V[:256])
     o_f, _ = flash_attention(Q2 * 50, K2 * 50, V[:256], 64, 64)
@@ -144,8 +143,8 @@ def demo_io_accounting():
     print("    ③ 读 P,V 写 O=PV          : O(N² + Nd)")
     print("    ⇒ HBM 访问 Θ(N²)（三次 N×N 大矩阵的读与写）")
     print("  FlashAttention")
-    print("    Q 分 N/Bq 块，每块遍历 K,V 的 N/Bk 块；块大小满足 Bq·Bk·d ≈ M（SRAM 容量）")
-    print("    ⇒ HBM 访问 Θ(N²d²/M)，d²/M ≪ 1 时远小于 Θ(N²)")
+    print("    Q 分 N/Bq 块，每块遍历 K,V 的 N/Bk 块；块大小满足 (Bq+2·Bk)·d ≲ M（SRAM 容量）")
+    print("    ⇒ 取 Bq·d ≈ M 时 HBM 访问 Θ(N²d²/M)，d²/M ≪ 1 时远小于 Θ(N²)")
 
     print("\n  具体算账（dtype=fp32, 4 bytes；设 SRAM M = 100 KB）:")
     M = 100 * 1024

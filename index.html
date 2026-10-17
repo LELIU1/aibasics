@@ -334,7 +334,7 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 <table>
 <thead>
 <tr>
-<th>$N,d$</th>
+<th>$N,D$</th>
 <th>元素数 $N^2D$</th>
 <th>广播中间张量</th>
 <th>分数矩阵 $N^2$ 个标量</th>
@@ -367,7 +367,7 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 </table>
 <p><strong>倍数恰好等于 $d$</strong>，跟序列长度无关：</p>
 <p>$$ \frac{N^2 D\cdot 4}{N^2\cdot 4} = D $$</p>
-<p>第一行是 64× 只因为那一行的 $d=64$。长序列让两个数字<strong>一起</strong>变大，比值不动。</p>
+<p>第一行是 64× 只因为那一行的 $D=64$。长序列让两个数字<strong>一起</strong>变大，比值不动。</p>
 <h3>一个重要澄清</h3>
 <p>标准 softmax attention <strong>根本不会写 <code>q - k</code></strong>（那是欧氏距离注意力 / 相对位置编码的写法）。
 它用 <code>einsum("bhnd,bhmd-&gt;bhnm")</code> 把 $d$ 直接<strong>收缩掉</strong>，峰值只有 $N^2$ 个标量
@@ -486,7 +486,8 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 </tr>
 </tbody>
 </table>
-<p>在 <code>ch01</code> 实测（CPU）：$2048^3$ GEMM 的 AI ≈ 341，逐元素算子 AI ≈ 0.12（就是那个 $1/8$）—— <strong>差 2800 倍</strong>。</p>
+<p>在 <code>ch01</code> 实测（CPU）：$2048^3$ GEMM 的 AI ≈ 341，逐元素算子 AI ≈ 0.12（就是那个 $1/8$）——
+<strong>差约 2700 倍</strong>（$341/0.125\approx2730$）。</p>
 <h3>5.1 峰值算力和带宽，分别取哪个精度？</h3>
 <p>这是算 roofline 时最容易搞混的一步：</p>
 <ul>
@@ -545,7 +546,7 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 <td>683</td>
 <td>2054 µs</td>
 <td>60 µs</td>
-<td>计算受限（慢 30×）</td>
+<td>计算受限（慢 34× $=2054/60$）</td>
 </tr>
 <tr>
 <td>BF16</td>
@@ -561,11 +562,19 @@ q5 - k5                # (B,H,N,N,D)   ← 真分配：B·H·N²·D 个数
 <td>2731</td>
 <td>69 µs</td>
 <td>15 µs</td>
-<td>计算受限，又快 1×</td>
+<td>计算受限，又快 2×（$=139/69$）</td>
 </tr>
 </tbody>
 </table>
-<p><strong>注意方向</strong>：精度越低，峰值涨得比字节数降得快（BF16→FP8：字节 ÷2，峰值 ×2），所以拐点右移，<strong>越容易撞上算力天花板</strong>——小形状 GEMM 在低精度下反而更容易变成访存受限。</p>
+<p><strong>注意方向</strong>：精度降低时，"字节数变少"与"峰值变高"对 roofline 的作用是<strong>相反</strong>的——
+拐点右移（20 → 295 → 591）意味着"够格算计算受限"的门槛变高了：</p>
+<ul>
+<li><strong>FP32 → BF16</strong>：AI 只涨 <strong>2×</strong>（字节 ÷2），峰值却涨 <strong>14.8×</strong>（66.9 → 989.5 TFLOPS），
+  于是 AI/拐点从 <strong>34 掉到 4.6</strong> → 余量缩小 7.4×，<strong>更难喂饱算力</strong>；</li>
+<li><strong>BF16 → FP8</strong>：AI 与峰值同为 <strong>×2</strong>，AI/拐点仍是 <strong>4.6</strong>，分类不变。</li>
+</ul>
+<p>所以<strong>低精度不是"更容易撞上算力天花板"，恰恰相反</strong>：天花板被抬得比 AI 涨得更快，
+大 GEMM 的余量从 34× 缩到 4.6×，而 AI 本来就低的小形状 GEMM 在低精度下更容易掉进访存受限区。</p>
 <blockquote>
 <p>⚠️ 三个坑：① 规格表上的大数字常是 2:1 <strong>稀疏</strong>值（H100 BF16 常被写成 1979，dense 是 989.5），算 roofline 一律用 dense；
 ② 除了 HBM 还有 SRAM/L2 这条带宽高一个数量级的屋顶，FlashAttention 就是把数据留在 SRAM 从而换到那条屋顶上（CH05）；
@@ -843,7 +852,10 @@ if __name__ == &quot;__main__&quot;:
 </tr>
 </tbody>
 </table>
-<p>（表中为相对份额，未乘 FLOPs 的系数 2，不影响占比结论。）</p>
+<p>（表中数值即 <code>ch02.py</code> 第 1 节的打印值。注意<strong>计数口径并不统一</strong>：attention 两行含 MAC 系数 2
+（$2HBN^2D$），QKV / O / MLP 各行按"矩阵乘法次数"计数未乘 2。所以绝对值可直接用，但
+attention 的占比被高估约 2×：若统一按 $2MNK$ 计，合计约 $8521$ GFLOP，attention 两行合计
+占比降到约 6.5%（每行 3.2%）。）</p>
 <p><strong>注意 attention 占比随 $N$ 的剧烈变化</strong>（这是长上下文一切优化的根源）：</p>
 <table>
 <thead>
@@ -977,7 +989,8 @@ $W$ 冻结，且合并后反向传播会破坏低秩结构）。</p>
 <li>$(QK^\top)V$：$2N^2d + 2N^2d$</li>
 <li>$Q(K^\top V)$：$2Nd^2 + 2Nd^2$</li>
 </ul>
-<p>实测（$N{=}2048, d{=}64$）：$(QK^\top)V$ = 4295.0 MFLOP，$Q(K^\top V)$ = 67.1 MFLOP，<strong>省 64×</strong>。
+<p>实测（$N{=}4096, d{=}64$，见 <code>ch02.py</code> 第 2 节）：$(QK^\top)V$ = 4295.0 MFLOP，
+$Q(K^\top V)$ = 67.1 MFLOP，<strong>省 64×</strong>。
 <strong>但两者并不等价</strong>（实测直接换序的最大偏差是 2479.7）—— 只有去掉 softmax 之后才能这么换
 （这正是 CH06 线性注意力的全部秘密）：</p>
 <p>$$ \mathrm{softmax}(QK^\top)V \ne Q(K^\top V) $$</p>
@@ -990,10 +1003,17 @@ $W$ 冻结，且合并后反向传播会破坏低秩结构）。</p>
 <h3>3.2 对角吸收（RMSNorm 的 $\gamma$）</h3>
 <p>RMSNorm：</p>
 <p>$$ \mathrm{RMSNorm}(x) = \underbrace{\frac{x}{\mathrm{rms}(x)}}_{\text{归一化}} \odot \gamma $$</p>
-<p>$\gamma$ 作用在<strong>输入维度</strong>上（逐列缩放）。若后面紧跟 $y = \mathrm{RMSNorm}(x)W$，则</p>
-<p>$$ (\hat x \odot \gamma) W = \hat x\, (\mathrm{diag}(\gamma)W) = \hat x\, W' \quad\Longrightarrow\quad W'<em ij="ij">{ij} = \gamma_j W</em> $$</p>
-<p>即 <strong>$\gamma$ 按列吸收进 $W$ 的行</strong>……更准确地说：$W$ 的第 $j$ 行整体乘 $\gamma_j$，
-代码写 <code>W * gamma[None, :]</code>（$W$ 形状 $(d_{in}, d_{out})$，$\gamma$ 长度 $d_{in}$）。</p>
+<p>$\gamma$ 作用在<strong>输入维度</strong>上（$x$ 的第 $j$ 个分量乘 $\gamma_j$）。记 $\hat x = x/\mathrm{rms}(x)$；
+下面统一用<strong>代码里的写法</strong> $y = h\,W^\top$（$W\in\mathbb R^{d_{out}\times d_{in}}$，$h$ 是归一化后的激活；
+它等价于教科书写法 $y=\hat x\,W$ 里的 $W\in\mathbb R^{d_{in}\times d_{out}}$ 取转置）。若 RMSNorm 后面
+紧跟这个线性层，则</p>
+<p>$$ (\hat x \odot \gamma)\, W^\top = \hat x\,\big(\mathrm{diag}(\gamma)W^\top\big)
+= \hat x\,\big(W\,\mathrm{diag}(\gamma)\big)^\top = \hat x\,W'^\top
+\quad\Longrightarrow\quad W'<em ij="ij">{ij} = \gamma_j\, W</em> $$</p>
+<p>即 <strong>$\gamma$ 按列吸收进 $W$</strong>：$W$ 的第 $j$ <strong>列</strong>（也就是输入维 $j$）整体乘 $\gamma_j$，
+代码写 <code>W * gamma[None, :]</code>（代码里 $W$ 形状 $(d_{out}, d_{in})$，$\gamma$ 长度 $d_{in}$）。
+（若坚持 $y=\hat x\,W$ 的记法，$W\in\mathbb R^{d_{in}\times d_{out}}$，同一件事要写
+<code>W * gamma[:, None]</code>，即按<strong>行</strong>缩放。<strong>代码是对的，别照这句去改代码。</strong>）</p>
 <blockquote>
 <p>⚠️ 这是本教程踩过的坑：广播方向搞反会得到 <code>max|Δ| ~ 1.7e+02</code>。
 记住口诀：<strong>$\gamma$ 乘在被求和的那一维上</strong>。</p>
@@ -1025,7 +1045,8 @@ $W$ 冻结，且合并后反向传播会破坏低秩结构）。</p>
 </tbody>
 </table>
 <p><strong>访存减少 3.0×，FLOPs 一点没变。</strong></p>
-<p>实测（CPU）：<code>gelu(add(x))</code> 分两个 pass 是 17.6 ms，融合成单 pass 是 8.0 ms（<strong>2.2×</strong>）。</p>
+<p>实测（CPU）：<code>gelu(add(x))</code> 分两个 pass 约 9~10 ms，融合成单 pass 约 5 ms（<strong>约 2×</strong>）。
+<strong>计时数值随机型/机器而异，看数量级和比值即可。</strong></p>
 <blockquote>
 <p>注意这里"不融合"的版本<strong>已经是 GEMM 主导</strong>（AI 仍有 227），所以只差 3×。
 真实的 norm / RoPE / 掩码这些纯逐元素算子，AI 只有 ~1，融合收益会大得多。</p>
@@ -1039,8 +1060,10 @@ q_ = q.transpose(1, 2).reshape(H, B * N, D)
 k_ = k.transpose(1, 2).reshape(H, B * N, D)
 S = torch.bmm(q_, k_.transpose(1, 2))        # (H, B*N, B*N)
 </code></pre>
-<p><code>ch02</code> 第 5 节实测（CPU）：32 次小 GEMM 121.5 ms vs 一次 <code>bmm(128 batch)</code> 112.5 ms ——
-<strong>只快 1.08×</strong>。这个数字有点"打脸"，但它恰好说明两件事：</p>
+<p><code>ch02</code> 第 5 节实测（CPU）：32 次小 GEMM 约 105 ms vs 一次 <code>bmm</code> 约 100 ms ——
+<strong>只快 1.05~1.10×</strong>（<strong>数值随机型/机器而异，同机多次跑也会抖</strong>）。
+这里的 <code>bmm</code> 是 <strong>batch $= H = 32$</strong>，每批 $(B{\cdot}N)\times D = 8192\times128$ 乘 $128\times128$。
+这个数字有点"打脸"，但它恰好说明两件事：</p>
 <ol>
 <li>CPU 上 BLAS 本身对单 GEMM 已经很高效，收益主要来自<strong>省掉 32 次 kernel launch</strong>；</li>
 <li><strong>GPU 上差别会大得多</strong>：除了 launch 开销，还有"每个小 GEMM 都要把权重重新读一遍"
@@ -1226,7 +1249,8 @@ def demo_head_merge():
     check(&quot;逐 head GEMM == 合并后 batched GEMM&quot;, outA, outB)
     tA = timer(lambda: torch.stack([Q[:, i] @ W[i].T for i in range(H)], dim=1))
     tB = timer(merged)
-    print(f&quot;  {H} 次小 GEMM: {tA:.1f} ms  →  1 次 bmm({Bn*H} 个 batch): {tB:.1f} ms  (快 {tA/tB:.2f}x)&quot;)
+    print(f&quot;  {H} 次小 GEMM: {tA:.1f} ms  →  1 次 bmm({H} 个 batch，每批 {Bn*N}x{D} @ {D}x{D}): &quot;
+          f&quot;{tB:.1f} ms  (快 {tA/tB:.2f}x)&quot;)
     print(&quot;  → GPU 上差别更大：kernel launch 开销 + 每个小 GEMM 都读一遍权重&quot;)
 
 
@@ -1290,7 +1314,8 @@ RoPE 不这样做——它把位置 $m$ 映射成一个<strong>旋转矩阵</str
 </tbody>
 </table>
 <p>最后一条在代码里很实用：RoPE 的梯度不需要额外推导，把 $q$ 旋转 $-m$ 即可。</p>
-<p><code>ch03</code> 第 1 节验证 $0^\circ/30^\circ/90^\circ/180^\circ/270^\circ$ 下的 $\lVert R^\top R - I\rVert \approx 10^{-8}$、$\det = +1$。</p>
+<p><code>ch03</code> 第 1 节验证 $0^\circ/30^\circ/90^\circ/180^\circ/270^\circ$ 下的 $\lVert R^\top R - I\rVert$：
+实测五个角度<strong>全部打印为 <code>0.00e+00</code></strong>（fp32 下数值上就是 0，$\le 10^{-7}$），$\det = +1.000000$。</p>
 <h2>3. 高维：分块对角 = $d/2$ 个独立旋转平面</h2>
 <p>$d$ 维空间被切成 $d/2$ 个 2D 平面，每个平面用不同角速度 $\theta_i$ 旋转：</p>
 <p>$$ \rho(m) = R(m\theta_0) \oplus R(m\theta_1) \oplus \cdots \oplus R(m\theta_{d/2-1}) = \mathrm{blkdiag}\big(R(m\theta_i)\big)_{i} $$</p>
@@ -1316,9 +1341,12 @@ $\theta_i$ 从 $1$ 衰减到 $\mathrm{base}^{-1}\approx 10^{-4}$，跨度 4 个�
     x1, x2 = x.chunk(2, -1)                 # 前半 / 后半
     return torch.cat((-x2, x1), -1)
 
-def apply_rope(x, cos, sin):                # cos/sin 形状 (..., d/2)
-    return x * cos.cat((cos, cos)) + rotate_half(x) * sin.cat((sin,sin))
+def apply_rope(x, cos, sin):                # x: (..., d)；cos/sin: (..., d/2)，先各自复制成 (..., d)
+    return x * torch.cat((cos, cos), -1) + rotate_half(x) * torch.cat((sin, sin), -1)
 </code></pre>
+<p>（<code>cos.cat(...)</code> 不是合法 PyTorch；<code>cat</code> 是 <code>torch</code> 的模块级函数，张量本身没有这个方法。
+代码里的 <code>apply_rope</code> 直接吃已经拼好的 <code>(..., d)</code> 的 <code>cos/sin</code>，即 <code>x * cos + rotate_half(x) * sin</code>，
+与上式等价。）</p>
 <p>或者更省：直接</p>
 <pre><code class="language-python">t1, t2 = t.chunk(2, -1)
 out = torch.cat((t1*cos - t2*sin, t2*cos + t1*sin), -1)     # cos/sin: (..., d/2)
@@ -1356,7 +1384,13 @@ out = torch.cat((t1*cos - t2*sin, t2*cos + t1*sin), -1)     # cos/sin: (..., d/2
 <p>复数形式在实现上更省：<code>torch.view_as_complex</code> 后一次复数乘法即可（很多推理框架这么做）。</p>
 <h2>6. 相对性的实测：解析 vs 经验</h2>
 <p>从 $\rho(m)^\top\rho(n)=\rho(n-m)$ 可得（对随机 $q,k$）：</p>
-<p>$$ \mathbb{E}\big[\langle q,k\rangle \cdot \langle q, \rho(\Delta)k\rangle\big] \big/ (\lVert q\rVert^2\lVert k\rVert^2) = \frac{2}{d}\sum_{i=0}^{d/2-1}\cos(\Delta\,\theta_i) $$</p>
+<p>$$ \mathrm{Corr}\big(\langle q,k\rangle,\ \langle q,\rho(\Delta)k\rangle\big)
+= \frac{1}{d}\,\mathbb{E}\big[\langle q,k\rangle \cdot \langle q, \rho(\Delta)k\rangle\big]
+= \frac{\mathrm{tr}\,\rho(\Delta)}{d} = \frac{2}{d}\sum_{i=0}^{d/2-1}\cos(\Delta\,\theta_i) $$</p>
+<p>（分母是 $d$ 不是 $\lVert q\rVert^2\lVert k\rVert^2=d^2$：$q,k$ 各分量独立同分布时
+$\mathbb{E}[(q^\top k)(q^\top\rho k)]=\mathrm{tr}\,\rho$，而两个随机内积各自的方差都是 $d$，
+所以相关系数 $=\mathrm{tr}\,\rho/d$。按 $d^2$ 归一化会在 $\Delta=0$ 时得到 $1/64$，
+与下面表格里的 1.000 矛盾。）</p>
 <p><code>ch03</code> 第 3 节把这个<strong>解析曲线</strong>和<strong>蒙特卡洛估计</strong>并列打印：</p>
 <table>
 <thead>
@@ -1393,16 +1427,21 @@ out = torch.cat((t1*cos - t2*sin, t2*cos + t1*sin), -1)     # cos/sin: (..., d/2
 <h3>YaRN（ramp 插值）</h3>
 <p>对不同频带用不同强度的插值，中间用斜坡过渡。设波长 $\lambda_i = 2\pi/\theta_i$，比值 $r = L_{train}/\lambda_i$：</p>
 <p>$$ \gamma_i = \mathrm{clip}!\left(\frac{r - \alpha}{\beta - \alpha},\ 0,\ 1\right),\qquad
-\theta_i' = \begin{cases}\theta_i, &amp; \gamma_i = 0\ (r\le\alpha)\ \dfrac{\theta_i}{(1-\gamma_i)/s + \gamma_i}, &amp; \text{otherwise}\end{cases} $$</p>
+\theta_i' = \theta_i\cdot\left[\frac{1-\gamma_i}{s} + \gamma_i\right] $$</p>
+<p>（这正是 <code>ch03.py</code> 里 <code>yarn_correction</code> 的返回值 $(1-\gamma)\cdot L_{train}/L_{test} + \gamma$，
+再乘到 $\theta_i$ 上：$\gamma=0$ 时 $\theta'_i=\theta_i/s$ 是<strong>纯插值</strong>，$\gamma=1$ 时 $\theta'_i=\theta_i$ 不动。
+⚠️ 若写成 $\theta_i\big/\big[\tfrac{1-\gamma_i}{s}+\gamma_i\big]$ 就把除号写反了 —— $\gamma=0$ 会给出
+$\theta_i\cdot s$，那是外推而不是插值。）</p>
 <p>直觉：</p>
 <ul>
-<li>$r \le \alpha$（波长<strong>短</strong>于训练长度 → 已见过足够多周期）→ 不插值，直接外推；</li>
-<li>$r \ge \beta$（波长<strong>长</strong>于训练长度 → 从未见过一个完整周期）→ 完全插值；</li>
+<li>$r \le \alpha$：$\lambda_i \gtrsim L_{train}$（波长<strong>长</strong>，训练时<strong>没走完一个周期</strong>）→ $\gamma=0$ → <strong>完全插值</strong> $\theta_i/s$；</li>
+<li>$r \ge \beta$：$\lambda_i \ll L_{train}$（波长<strong>短</strong>，训练时已见过很多周期）→ $\gamma=1$ → <strong>不插值</strong>，原样外推；</li>
 <li>中间 → 斜坡过渡。</li>
 </ul>
 <p>再加一个 attention 温度的修正（$t = 0.1\ln s + 1$）补偿熵的变化。</p>
 <h2>8. 一个反例：不正交会发生什么</h2>
-<p><code>ch03</code> 第 6 节故意用一个<strong>非正交</strong>的"伪位置矩阵" $A(m)$（比如带上缩放的对角矩阵）替换 $\rho(m)$：</p>
+<p><code>ch03</code> 第 6 节故意用一个<strong>非正交</strong>的"伪位置矩阵" $A(m)$ 替换 $\rho(m)$ —— 代码里就是
+<code>A = torch.randn(d, d) * 0.1</code>，即一个<strong>随机的、带 0.1 缩放的稠密非正交矩阵</strong>（不是对角矩阵）：</p>
 <ul>
 <li>$\langle A(m)q, A(n)k\rangle$ <strong>不再</strong>只依赖 $n-m$；</li>
 <li>$\lVert A(m) q\rVert \ne \lVert q\rVert$，点积尺度随位置漂移 → 等价于随位置变化的温度。</li>
@@ -1563,7 +1602,7 @@ def demo_relativity():
             a, b_ = torch.randn(d), torch.randn(d)
             emp.append((a @ b_) * (a @ rope(b_, delta)))
         emp = torch.tensor(emp).mean().item()
-        print(f&quot;    Δ={delta:&gt;6}: 解析 = {analytic:+.4f}   经验 E[⟨q,k⟩⟨q,ρ(Δ)k⟩]/‖q‖²‖k‖² = {emp/d:+.4f}&quot;)
+        print(f&quot;    Δ={delta:&gt;6}: 解析 = {analytic:+.4f}   经验 Corr = E[⟨q,k⟩⟨q,ρ(Δ)k⟩]/d = {emp/d:+.4f}&quot;)
     print(&quot;  → 相关性随距离衰减但有振荡（低频维度周期长），这就是 RoPE 的局部性先验&quot;)
 
 
@@ -1695,7 +1734,7 @@ if __name__ == &quot;__main__&quot;:
 <p>后果：$d$ 越大，logits 的分布越宽，softmax 越接近 one-hot，梯度 $\partial p_i/\partial s_j = p_i(\delta_{ij}-p_j)$ 趋于 0 → <strong>梯度饱和</strong>。</p>
 <p><strong>度量：稳定秩（stable rank）</strong></p>
 <p>$$ \mathrm{sr}(A) = \frac{\sum_i \sigma_i^2}{\sigma_{\max}^2} $$</p>
-<p>它衡量"这个算子实际用了多少维"。实测（$d{=}512$ 的 logits 乘不同温度）：</p>
+<p>它衡量"这个算子实际用了多少维"。实测（<code>ch04</code> 第 6 节：H=8、N=256 的随机 logits 乘不同温度）：</p>
 <table>
 <thead>
 <tr>
@@ -1716,11 +1755,6 @@ if __name__ == &quot;__main__&quot;:
 <td>——</td>
 </tr>
 <tr>
-<td>$\times 1/\sqrt d$</td>
-<td>——</td>
-<td>正常范围</td>
-</tr>
-<tr>
 <td>$\times 3.0$</td>
 <td>32.13</td>
 <td>开始尖锐</td>
@@ -1739,14 +1773,20 @@ if __name__ == &quot;__main__&quot;:
 <p>反向传播时只需要 $\log$ 分母，用 <strong>log-sum-exp</strong>：</p>
 <p>$$ \mathrm{LSE}(s) = m + \log\sum_j e^{s_j - m} $$</p>
 <p>$\log\mathrm{softmax}$ 直接是 $s_i - \mathrm{LSE}(s)$，交叉熵损失也用 LSE 算，全程不产生大数。</p>
-<p><code>ch04</code> 第 2 节用 <code>logits</code> 很大的情形验证了手写 LSE 与 <code>F.cross_entropy</code> 一致。</p>
+<p><code>ch04</code> 第 2 节用 <code>logits</code> 很大的情形（<code>randn(4,100)*20</code>）验证了手写 LSE 与
+<code>torch.logsumexp</code> / <code>torch.log_softmax</code> 一致（两条 <code>[PASS]</code>）。</p>
 <h2>4. 因果掩码 = 加性 $0/-\infty$ 矩阵</h2>
 <p>$$ M_{nm} = \begin{cases}0, &amp; n \ge m\ -\infty, &amp; n &lt; m\end{cases} $$</p>
 <p>加上 $M$ 后 softmax 把 $n&lt;m$ 的项变成 0 ⇒ $A$ 变成<strong>下三角的行随机矩阵</strong>。</p>
 <p>写成矩阵语言：</p>
-<p>$$ A = \mathrm{softmax}(S + M) = \mathrm{softmax}\big(\mathrm{tril}(S)\big) \quad(\text{行归一化意义下}) $$</p>
+<p>$$ A = \mathrm{softmax}(S + M) = \text{行归一化}\big(\mathrm{tril}(e^{S})\big),\qquad (e^S)<em nm="nm">{nm} = e^{s</em> $$}</p>
 <p>也就是"把矩阵乘限制到下三角"。这直接给出 FLOPs 减半（$2N^2d \to N^2d$ 每部分）。</p>
 <blockquote>
+<p>⚠️ 被 mask 掉的位置要填 <strong>$-\infty$ 而不是 0</strong>：只有 $-\infty$ 才有 $e^{-\infty}=0$。
+写成 $\mathrm{softmax}(\mathrm{tril}(S))$ 是错的——那是在 <strong>logits</strong> 上做 <code>tril</code>，
+上三角被填成 $0$，于是 $e^{0}=1\neq 0$，掩码完全失效：
+实测 $N{=}6$ 时上三角最大值高达 <strong>0.206</strong>（正确做法应恒为 0）。
+正确写法是先取指数、再 <code>tril</code>（等价地加 $-\infty$ 掩码），然后做行归一化。</p>
 <p>实现细节：<code>-inf</code> 在 fp16/bf16 里参与 <code>exp</code> 会得到 <code>nan</code>（<code>-inf - (-inf)</code>）。
 标准做法是用一个<strong>有限的大负数</strong>（如 <code>-1e9</code> 或 <code>torch.finfo(dtype).min</code>），
 或者先 <code>masked_fill</code> 再减 max。CH05 的 FlashAttention 里用 <code>-inf</code> + <code>nan_to_num</code> 处理初始块。</p>
@@ -1783,7 +1823,8 @@ if __name__ == &quot;__main__&quot;:
 </tbody>
 </table>
 <p>矩阵视角：K/V 头的重复 = 把 $(H_{kv}, D)$ 的张量沿 head 维<strong>广播</strong> $g$ 次：</p>
-<pre><code class="language-python"># k: (N, Hkv, D)  -&gt;  (N, H, D)，零拷贝
+<pre><code class="language-python"># k: (N, Hkv, D)  -&gt;  (N, H, D)
+# expand 是零拷贝（stride=0 视图），但随后的 reshape 会物化出一份真实拷贝
 k = k.unsqueeze(2).expand(N, Hkv, g, D).reshape(N, H, D)
 </code></pre>
 <p>注意 <code>expand</code> 是 <strong>stride=0 的视图</strong>（CH01），不占内存；但随后的 <code>reshape</code> 会物化。
@@ -1810,7 +1851,7 @@ FlashDecoding / PagedAttention 就是这么做的。</p>
 <li>推导 $\partial\,\mathrm{softmax}(s)<em ij="ij">i / \partial s_j = p_i(\delta</em> - p_j)$，并说明为何 $p$ 接近 one-hot 时梯度消失。</li>
 <li>证明行随机矩阵的乘积仍是行随机矩阵（多层注意力堆叠的"保凸组合"性质）。</li>
 <li>为什么 MQA 有时掉点？从"不同 head 想 attend 到不同位置"的秩的角度解释。</li>
-<li>计算 LLama-3-8B（32 层、$H_{kv}{=}8$、$D{=}128$）在 $t{=}8192$、bf16 下的 KV Cache 大小。</li>
+<li>计算 Llama-3-8B（32 层、$H_{kv}{=}8$、$D{=}128$）在 $t{=}8192$、bf16 下的 KV Cache 大小。</li>
 </ol>
 <hr />
 <p><strong>下一章</strong>：CH05 FlashAttention——用在线 softmax + 分块把 $O(N^2)$ 显存压成 $O(N)$。</p></div><div class="pane pane-code"><pre><code class="language-python">&quot;&quot;&quot;
@@ -1925,7 +1966,7 @@ def demo_gqa():
         k_rep = k.repeat_interleave(g, dim=1)
         v_rep = v.repeat_interleave(g, dim=1)
         o1 = mha(q, k_rep, v_rep, causal=True)
-        # 写法 2：用 expand + reshape 零拷贝广播（B,Hkv,1,N,D → B,Hq,N,D）
+        # 写法 2：expand 零拷贝广播（stride=0 视图）+ reshape 物化（B,Hkv,1,N,D → B,Hq,N,D）
         k_b = k.unsqueeze(2).expand(B, Hkv, g, N, D).reshape(B, Hq, N, D)
         v_b = v.unsqueeze(2).expand(B, Hkv, g, N, D).reshape(B, Hq, N, D)
         o2 = mha(q, k_b, v_b, causal=True)
@@ -2098,7 +2139,7 @@ if __name__ == &quot;__main__&quot;:
 <td><code>max|Δ| ≈ 4e-6</code></td>
 </tr>
 <tr>
-<td>大 logits（$× 20$）数值稳定</td>
+<td>大 logits（Q、K 各 $× 50$，logits 到 $\pm 50{\times}d$ 量级）数值稳定</td>
 <td>PASS</td>
 </tr>
 <tr>
@@ -2159,14 +2200,21 @@ for j in range(...):
     qk = tl.dot(q, k) * qk_scale
     qk = tl.where(mask, qk, -inf)
     m_new = tl.maximum(m_i, tl.max(qk, 1))
-    alpha = tl.math.exp2(m_i - m_new)     # 用 exp2 而非 exp：硬件上更快
-    p = tl.math.exp2(qk - m_new)
+    alpha = tl.math.exp2((m_i - m_new) * 1.4426950408889634)   # log2 e
+    p = tl.math.exp2((qk - m_new[:, None]) * 1.4426950408889634)
     l_i = l_i * alpha + tl.sum(p, 1)
-    acc = acc * alpha + tl.dot(p.to(fp8/bf16), v)
+    acc = acc * alpha[:, None] + tl.dot(p.to(fp8/bf16), v)
 </code></pre>
 <p>关键技巧：</p>
 <ul>
-<li><strong>用 <code>exp2</code> 代替 <code>exp</code></strong>：$e^x = 2^{x\log_2 e}$，把 $\log_2 e$ 吸收进 $1/\sqrt d$ 里（CH02 的标量吸收！）；</li>
+<li><strong>用 <code>exp2</code> 代替 <code>exp</code></strong>：因为 $e^x = 2^{x\log_2 e}$，所以 <strong>必须显式乘 $\log_2 e = 1.4426950408889634$</strong>
+  （上面 <code>* 1.4426950408889634</code> 就是它的来源，与 <code>ch05.py</code> 的 Triton 附录一致）。
+  漏掉这个因子，$p$ 会变成 $2^{s-m}$ 而不是 $e^{s-m}$，结果直接错；</li>
+<li>另一种等价做法是 CH02 的<strong>标量吸收</strong>：把 $\log_2 e$ 折进 <code>sm_scale</code>，这样 <code>exp2</code> 前就不用再乘。
+  两种写法的差别体现在 $L$ 的单位上：</li>
+<li>本文件 <code>ch05.py</code> 的"显式乘"写法：$m$ 仍是自然对数单位，$L = m + \log \ell = \mathrm{LSE}$；</li>
+<li>"吸收进 scale"的写法：$m,\ell,L$ 整体活在 $\log_2$ 单位下，$L = (\log_2 e)\cdot \mathrm{LSE}$
+    （$L$ 要除以 $\log_2 e$ 才是自然对数的 LSE）。反向用 $L$ 时需保持同一约定；</li>
 <li><code>tl.dot</code> 走 tensor core，要求块大小是 16 的倍数；</li>
 <li>mask 用 <code>tl.where</code>，且完全被 mask 的块直接跳过（省算力）。</li>
 </ul>
@@ -2177,7 +2225,10 @@ for j in range(...):
 <h2>练习</h2>
 <ol>
 <li>手推在线 softmax 的递推式，说明为什么 $\ell$ 和 $O$ 的重缩放因子<strong>必须相同</strong>。</li>
-<li>若 $S$ 的某些行整行被 mask（全 $-inf$），$\ell = 0$ 会怎样？代码里怎么兜住？（看 <code>nan_to_num</code>）</li>
+<li>若 $S$ 的某些行整行被 mask（全 $-\infty$），会怎样？为什么只对重缩放因子做 <code>nan_to_num</code> 不够？
+   （提示：此时 $m_{new}=-\infty$，于是 $P=\exp(S-m_{new})=\exp(\mathrm{nan})=\mathrm{nan}$，
+   $\ell$ 和 $O$ 也跟着变 nan——<strong>不会是 0</strong>，实测 $\ell=\mathrm{nan}$。
+   所以<strong>对 $P$ 也要做 <code>nan_to_num</code></strong>（$\mathrm{nan}\to 0$），代码里目前只兜住了 $e^{m_{old}-m_{new}}$。）</li>
 <li>把 <code>flash_attention</code> 改成支持 GQA（K/V 头数不同），验证一致。</li>
 <li>为什么反向"重算"反而更快？（提示：重算的 GEMM 是计算受限，而存/读 $N^2$ 是带宽受限）</li>
 </ol>
@@ -2308,7 +2359,6 @@ def demo_flash_correctness():
                 return
 
     # 检验极端数值（1000 量级 logits，朴素实现会溢出）
-    S_big = torch.randn(256, 256) * 1000
     Q2, K2 = torch.randn(256, 64), torch.randn(256, 64)
     o_n, _ = naive_attention(Q2 * 50, K2 * 50, V[:256])
     o_f, _ = flash_attention(Q2 * 50, K2 * 50, V[:256], 64, 64)
@@ -2328,8 +2378,8 @@ def demo_io_accounting():
     print(&quot;    ③ 读 P,V 写 O=PV          : O(N² + Nd)&quot;)
     print(&quot;    ⇒ HBM 访问 Θ(N²)（三次 N×N 大矩阵的读与写）&quot;)
     print(&quot;  FlashAttention&quot;)
-    print(&quot;    Q 分 N/Bq 块，每块遍历 K,V 的 N/Bk 块；块大小满足 Bq·Bk·d ≈ M（SRAM 容量）&quot;)
-    print(&quot;    ⇒ HBM 访问 Θ(N²d²/M)，d²/M ≪ 1 时远小于 Θ(N²)&quot;)
+    print(&quot;    Q 分 N/Bq 块，每块遍历 K,V 的 N/Bk 块；块大小满足 (Bq+2·Bk)·d ≲ M（SRAM 容量）&quot;)
+    print(&quot;    ⇒ 取 Bq·d ≈ M 时 HBM 访问 Θ(N²d²/M)，d²/M ≪ 1 时远小于 Θ(N²)&quot;)
 
     print(&quot;\n  具体算账（dtype=fp32, 4 bytes；设 SRAM M = 100 KB）:&quot;)
     M = 100 * 1024
@@ -2433,7 +2483,7 @@ if __name__ == &quot;__main__&quot;:
 但因为 softmax 卡在中间，两者不等价。</p>
 <p><strong>如果去掉 softmax</strong>（只保留因果掩码）：</p>
 <p>$$ o_t = \sum_{j\le t} (q_t^\top k_j)\, v_j = \underbrace{\Big(\sum_{j\le t} v_j k_j^\top\Big)}_{S_t}\, q_t $$</p>
-<p>定义<strong>状态矩阵</strong> $S_t \in \mathbb{R}^{d_v\times d_k}$：</p>
+<p>定义<strong>状态矩阵</strong> $S_t \in \mathbb{R}^{d_v\times d_k}$（行是 value 维、列是 key 维）：</p>
 <p>$$ \boxed{S_t = \sum_{j\le t} v_j k_j^\top = S_{t-1} + v_t k_t^\top} $$</p>
 <p>它有两个名字，理解它要同时用这两个名字：</p>
 <table>
@@ -2448,7 +2498,7 @@ if __name__ == &quot;__main__&quot;:
 <tr>
 <td>外积累加</td>
 <td>每步加一个<strong>秩1矩阵</strong> $v_t k_t^\top$</td>
-<td><code>bnk,bnv-&gt;bkv</code></td>
+<td><code>bnv,bnk-&gt;bvk</code></td>
 </tr>
 <tr>
 <td>联想记忆</td>
@@ -2457,6 +2507,12 @@ if __name__ == &quot;__main__&quot;:
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p>⚠️ einsum 的下标顺序要和公式对齐：<code>S</code> 是 $d_v\times d_k$，所以输出脚标必须是 <strong><code>-&gt;bvk</code></strong>（先 $v$ 后 $k$），
+并且第一个输入放 $v$、第二个放 $k$。写成 <code>bnk,bnv-&gt;bkv</code> 得到的是 $S^\top\ (d_k\times d_v)$，
+后面 $o_t=S_t q_t$ 就乘不动了。代码里是 <code>torch.outer(V[t], K[t])</code>、<code>S @ Q[t]</code>、<code>Qc @ S.T</code>，
+自始至终都是 $d_v\times d_k$ 这一约定。</p>
+</blockquote>
 <p><strong>复杂度</strong>：</p>
 <table>
 <thead>
@@ -2499,11 +2555,21 @@ if __name__ == &quot;__main__&quot;:
 coeff = lam ** (c - 1 - idx[:c].float())
 S = (lam ** c) * S + (Vc * coeff[:, None]).T @ Kc
 </code></pre>
-<p><strong>对比 CH05</strong>：FlashAttention 是"块内二次 + 无块间状态"（因为 softmax 的归一化是全局的，
-用 $m/\ell$ 递推）；线性注意力是"块内二次 + 块间状态传递"。
+<p><strong>对比 CH05</strong>：FlashAttention 也是"块内二次 + 块间传递"，但块间只传<strong>两个标量</strong> $m/\ell$
+（softmax 的归一化是全局的，用 running max / running sum 递推）；
+线性注意力块间传的是一个 $d\times d$ <strong>状态矩阵</strong>。
 CH07 的 Gated DeltaNet 会把两者<strong>都用上</strong>。</p>
-<p>复杂度：块内 $O(C c^2 d)$，块间 $O(C d^2)$，总 $O(N c d + N d^2/c)$，
-取 $c \approx \sqrt{N}$ 最优。</p>
+<p>复杂度（记块长 $c$、块数 $C=N/c$）：</p>
+<ul>
+<li>块内：每块 $O(c^2 d)$，$C$ 块合计 $O(N c d)$；</li>
+<li>块间：每块一次状态更新 $(d\times c)\times(c\times d)$ 是 $O(c d^2)$，$C=N/c$ 块合计 <strong>$O(N d^2)$</strong>；</li>
+<li>总 <strong>$O(N c d + N d^2)$</strong>（与 <code>ch06</code> 第 3 节的打印一致）。</li>
+</ul>
+<p>注意块间那项是 $O(Nd^2)$ 而<strong>不是</strong> $O(Nd^2/c)$——每块更新状态本身就要读 $c$ 个 token，
+块数变少（$c$ 变大）并不能把这一项摊薄。</p>
+<p>所以 $c$ 不由"最小化总 FLOPs"决定（上式对 $c$ 单调增，不存在 $\sqrt N$ 之类的最优点），
+而是由<strong>并行度</strong>决定：$c$ 要大到块内 matmul 能打满 tensor core，又要小到 $N/c$ 个块
+能填满 SM 数量。这也是为什么 <code>ch06</code> 的代码注释写的是"串行步数从 $N$ 降到 $N/c$"。</p>
 <h2>4. 核特征映射：用特征逼近 softmax</h2>
 <p>如果还想要 softmax 的"尖锐"性质，可以用核技巧：</p>
 <p>$$ \mathrm{softmax}(q^\top k) \approx \phi(q)^\top \phi(k) $$</p>
@@ -2513,31 +2579,46 @@ CH07 的 Gated DeltaNet 会把两者<strong>都用上</strong>。</p>
 <h3>FAVOR+（Performer）</h3>
 <p>$$ \phi(x) = \frac{e^{\lVert x\rVert^2/2}}{\sqrt{D}}\sqrt{2}\,\big(\cos(xW + b)\big),\qquad W_{ij}\sim \mathcal N(0,1),\ b_i\sim U(0,2\pi) $$</p>
 <p>这是 <strong>Random Fourier Features</strong> 对 RBF 核的无偏估计：</p>
-<p>$$ \mathbb{E}\big[\phi(q)^\top\phi(k)\big] = e^{q^\top k} \cdot e^{-\lVert q\rVert^2/2 - \lVert k\rVert^2/2} $$</p>
-<p><code>ch06</code> 第 4 节实测（归一化输入后，温度 $T{=}2$）：</p>
+<p>由 $\mathbb{E}_{w,b}\big[\cos(w^\top q+b)\cos(w^\top k+b)\big]=\tfrac12 e^{-\lVert q-k\rVert^2/2}$ 得</p>
+<p>$$ \mathbb{E}\big[\phi(q)^\top\phi(k)\big]
+= e^{\lVert q\rVert^2/2}\cdot e^{\lVert k\rVert^2/2}\cdot \frac{2}{D}\cdot \frac{D}{2}\, e^{-\lVert q-k\rVert^2/2}
+= e^{\lVert q\rVert^2/2+\lVert k\rVert^2/2}\, e^{-\lVert q-k\rVert^2/2}
+= e^{\,q^\top k} $$</p>
+<p>即<strong>无偏</strong>，不需要任何修正项。实测（$D{=}2{\times}10^5$ 蒙特卡洛，单位范数 $q,k$、$T{=}2$）：
+估计值 $0.739$ vs $e^{q^\top k}=0.719$，差的 3% 是采样噪声；
+若按旧版错误地再乘一个 $e^{-\lVert q\rVert^2/2-\lVert k\rVert^2/2}$，会得到 $0.100$，差近一个数量级。</p>
+<p><code>ch06</code> 第 4 节实测（归一化输入后，温度 $T{=}2$；相对误差 $=\lVert O_{feat}-O_{softmax}\rVert/\lVert O_{softmax}\rVert$）：</p>
 <table>
 <thead>
 <tr>
-<th>特征维 $D$</th>
+<th>特征</th>
 <th>相对误差</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>64</td>
+<td>ReLU 特征（$\phi=\mathrm{relu}(x)+1$）</td>
+<td>0.2290</td>
+</tr>
+<tr>
+<td>FAVOR+ $D{=}64$</td>
 <td>1.1513</td>
 </tr>
 <tr>
-<td>256</td>
+<td>FAVOR+ $D{=}256$</td>
 <td>0.3874</td>
 </tr>
 <tr>
-<td>1024</td>
+<td>FAVOR+ $D{=}1024$</td>
 <td>0.2013</td>
 </tr>
 <tr>
-<td>4096</td>
+<td>FAVOR+ $D{=}4096$</td>
 <td>0.0975</td>
+</tr>
+<tr>
+<td>FAVOR+ $D{=}16384$</td>
+<td>0.0481</td>
 </tr>
 </tbody>
 </table>
@@ -2556,8 +2637,11 @@ CH07 的 Gated DeltaNet 会把两者<strong>都用上</strong>。</p>
 不如 softmax attention 的根本原因（复制/联想任务上尤其明显）。</p>
 <h3>Δ rule 预览</h3>
 <p>解决办法：写入前<strong>先擦除</strong>与该 key 关联的旧值（Widrow-Hoff / delta rule）：</p>
-<p>$$ S_t = S_{t-1} + \beta_t\big(v_t - S_{t-1}k_t\big) k_t^\top $$</p>
-<p><code>ch06</code> 第 5 节用一个"联想记忆召回"任务演示（$n_{pairs}{=}32$）：</p>
+<p>$$ S_t = S_{t-1} + \beta_t\big(v_t - S_{t-1}k_t\big) k_t^\top,\qquad \beta_t = \frac{1}{\lVert k_t\rVert^2} $$</p>
+<p>（$\beta_t$ 是<strong>步长</strong>：把 $\beta_t=1/\lVert k_t\rVert^2$ 代入，一次更新就精确满足 $S_t k_t = v_t$，
+即把 $k_t$ 方向上的旧记忆整条擦除、换成 $v_t$；$k_t$ 已归一化时 $\beta_t=1$。
+代码里正是 <code>S + torch.outer(v - S @ k, k) / (k @ k)</code>。）</p>
+<p><code>ch06</code> 第 5 节用一个"联想记忆召回"任务演示（$n_{pairs}{=}32$，$d{=}32$，状态已满秩）：</p>
 <table>
 <thead>
 <tr>
@@ -2589,7 +2673,7 @@ CH07 的 Gated DeltaNet 会把两者<strong>都用上</strong>。</p>
 <ol>
 <li>推导 $S_t = \sum_{j\le t}\lambda^{t-j} v_j k_j^\top$，并说明 $\lambda$ 对奇异值的缩放。</li>
 <li>为什么 chunkwise 里块内系数是 $\lambda^{c-1-\mathrm{idx}}$ 而不是 $\lambda^{\mathrm{idx}}$？</li>
-<li>用 <code>torch.outer</code> 手写 $S_t$ 递推，与 <code>einsum("bnk,bnv-&gt;bkv")</code> 对比，验证一致。</li>
+<li>用 <code>torch.outer</code> 手写 $S_t$ 递推，与 <code>einsum("bnv,bnk-&gt;bvk")</code> 对比，验证一致。</li>
 <li>设计一个"联想召回"任务：随机 $K$ 对 $(k_i, v_i)$，测随 $t$ 增大线性注意力的召回误差曲线，
    观察在 $t \approx d$ 处的拐点。</li>
 </ol>
@@ -2917,9 +3001,14 @@ Gated DeltaNet 的 $\alpha_t(I - \beta_t k_t k_t^\top)$ 只在 $k_t$ 这一个�
 <h2>3. 为什么串行递推上不了 GPU</h2>
 <p>$S_t$ 依赖 $S_{t-1}$，$N$ 步完全串行。GPU 上这意味着 $N$ 次 kernel launch，
 每次只做一个 $d\times d$ 的外积更新 —— 算术强度极低，完全跑不起来。</p>
-<p>必须 <strong>chunkwise</strong>：块内用矩阵运算并行，块间只做 $N/c$ 步状态传递。
+<p>必须 <strong>chunkwise</strong>：块内用矩阵运算并行，块间只做 $N/C$ 步状态传递。
 难点在于：块内第 $t$ 个输出依赖<strong>块内所有前面的转移矩阵的乘积</strong>：</p>
-<p>$$ S_t = \Big(\prod_{i\le t} \alpha_i\big(I-\beta_i k_i k_i^\top\big)\Big) S_0 + \cdots $$</p>
+<p>$$ S_t = c_t\; S_0\Big(\prod_{i\le t}\big(I-\beta_i k_i k_i^\top\big)\Big) + \cdots,\qquad c_t = \prod_{i\le t}\alpha_i $$</p>
+<p>（$\cdots$ 是各步写入项 $\beta_jv_jk_j^\top$ 经后续转移矩阵传递后的贡献。）</p>
+<p>⚠️ 转移矩阵是<strong>右乘</strong>在 $S_0$ 上的：递推里 $S_{t-1}$ 在左、$(I-\beta_tk_tk_t^\top)$ 在右，
+所以展开是 $S_0$ 后面依次跟上 $i=0,1,\dots,t$ 的因子，不能写成 $\big(\prod_i\alpha_i(I-\beta_ik_ik_i^\top)\big)S_0$。
+这些因子互不交换，顺序反了结果就错了（实测：$d{=}4$、3 步，右乘误差 $1.3\times10^{-7}$，左乘误差 $6.9\times10^{-1}$）。
+§4 的 WY 推导正是按"新因子接在右边"的顺序做的：$P_t = P_{t-1}(I-\beta_tk_tk_t^\top)$。</p>
 <p>那个 $\prod_{i\le t}(I - \beta_i k_i k_i^\top)$ 是 $t$ 个 $d\times d$ 矩阵相乘 —— 必须<strong>压缩</strong>。</p>
 <h2>4. WY 表示：把一串秩1修正压成一个 $d\times C$ 矩阵</h2>
 <p>这是从 <strong>Householder QR 的分块化</strong>（Bischof–Van Loan，LAPACK 的紧凑 WY 表示）搬过来的技巧。</p>
@@ -2927,6 +3016,12 @@ Gated DeltaNet 的 $\alpha_t(I - \beta_t k_t k_t^\top)$ 只在 $k_t$ 这一个�
 <p>$$ \prod_{i\le t}\big(I - \beta_i k_i k_i^\top\big) = I - W_{0:t}\, K_{0:t}^\top $$</p>
 <p>其中 $W_{0:t}$ 的列 $w_i$ 满足下三角递推：</p>
 <p>$$ w_t = \beta_t\Big(k_t - \sum_{i&lt;t}(k_i^\top k_t)\, w_i\Big) $$</p>
+<blockquote>
+<p><strong>形状约定</strong>（转置位置最容易搞反）：上式按<strong>列</strong>堆叠，即 $W,K\in\mathbb{R}^{d\times C}$、第 $i$ 列为 $w_i,k_i$。
+而代码里按<strong>行</strong>堆叠：$K\in\mathbb{R}^{C\times d}$ 的行 $i$ 是 $k_i^\top$（所以 §6 写 $G = KK^\top$），
+$W\in\mathbb{R}^{C\times d}$ 的行 $i$ 是 $w_i^\top$，同一个矩阵在代码里写成 $I - W_{0:t}^\top K_{0:t}$。
+两种写法是同一个 $\sum_{i\le t}w_ik_i^\top$，但 $W^\top K$ 与 $WK^\top$ 不是一回事。</p>
+</blockquote>
 <p>写成矩阵就是一个<strong>下三角线性系统</strong>（记 Gram 矩阵 $G_{ij} = k_i^\top k_j$）：</p>
 <p>$$ \big(I + \mathrm{diag}(\beta)\cdot \mathrm{tril}(G, -1)\big)\, W = \mathrm{diag}(\beta)\, K $$</p>
 <p>用 <code>torch.linalg.solve_triangular(..., upper=False)</code> 一次解出全部 $W$。</p>
@@ -2973,7 +3068,9 @@ Gated DeltaNet 的 $\alpha_t(I - \beta_t k_t k_t^\top)$ 只在 $k_t$ 这一个�
 <blockquote>
 <p>⚠️ <strong>本教程踩的最大的坑</strong>：Step 4 的 $M$ 必须是 $\mathrm{tril}(Q K^\top)$（索引 $[t,j]$），
 不能写成 $\mathrm{tril}(K Q^\top)$ 再转置——虽然看起来"转置一下就行"，
-但 <code>tril</code> 的<strong>方向</strong>在转置后是反的，会导致 <code>max|Δ| ~ 4e+03</code>。
+但 <code>tril</code> 的<strong>方向</strong>在转置后是反的。误差量级随配置放大：
+$N{=}64,d{=}16,C{=}16$ 时 <code>max|Δ| ≈ 1.9e+01</code>；$N{=}512,d{=}64,C{=}64$ 时 <code>max|Δ| ≈ 5e+03</code>
+（状态 $S$ 被污染后会跨块累积，所以序列越长错得越离谱）。
 写这类代码时，把每个矩阵的<strong>索引含义</strong>写进注释：<code>[t,j] = 第 t 个 query 对第 j 个 key</code>。</p>
 </blockquote>
 <h2>7. 验证与性能</h2>
@@ -2988,22 +3085,27 @@ Gated DeltaNet 的 $\alpha_t(I - \beta_t k_t k_t^\top)$ 只在 $k_t$ 这一个�
 <tbody>
 <tr>
 <td>$N{=}64, d{=}16, C{=}16$</td>
-<td>~1.9e-06</td>
+<td>1.907e-06</td>
 </tr>
 <tr>
 <td>$N{=}128, d{=}32, C{=}32$</td>
-<td>~2.7e-06</td>
+<td>1.907e-06</td>
 </tr>
 <tr>
 <td>$N{=}256, d{=}32, C{=}64$</td>
-<td>~3.8e-06</td>
+<td>1.907e-06</td>
 </tr>
 <tr>
-<td>$\alpha{=}1,\beta{=}1$ / $\alpha{=}1,\beta{=}0.5$ / $\alpha{=}0.9,\beta{=}0.9$</td>
-<td>全部 PASS</td>
+<td>$\alpha{=}1,\beta{=}1$</td>
+<td>3.815e-06</td>
+</tr>
+<tr>
+<td>$\alpha{=}1,\beta{=}0.5$ / $\alpha{=}0.9,\beta{=}0.9$</td>
+<td>1.907e-06</td>
 </tr>
 </tbody>
 </table>
+<p>（三组配置打印出来<strong>恰好都是</strong> 1.907e-06，不是笔误：误差来自 fp32 求和顺序，量级与 $N,d$ 关系不大。）</p>
 <p>速度（CPU，$B{=}8, N{=}512, d{=}64, C{=}64$）：</p>
 <table>
 <thead>
@@ -3015,18 +3117,20 @@ Gated DeltaNet 的 $\alpha_t(I - \beta_t k_t k_t^\top)$ 只在 $k_t$ 这一个�
 <tbody>
 <tr>
 <td><code>gdn_naive</code>（逐 token）</td>
-<td>284 ms</td>
+<td>≈180–260 ms</td>
 </tr>
 <tr>
 <td><code>gdn_chunkwise</code></td>
-<td>12 ms</td>
+<td>≈6–7 ms</td>
 </tr>
 <tr>
 <td><strong>加速</strong></td>
-<td><strong>24.5×</strong></td>
+<td><strong>≈26–42×</strong></td>
 </tr>
 </tbody>
 </table>
+<p>CPU 计时抖动很大（同一台机器多次跑在 26×–42× 之间），所以这里只给区间；
+数量级结论是稳定的：chunkwise 快一个数量级以上。</p>
 <p>（GPU 上这个差距会更大，因为 chunkwise 能用上 tensor core。）</p>
 <h2>8. 与 Mamba2 / SSD 的对照</h2>
 <table>
@@ -3069,7 +3173,8 @@ DeltaNet 的 $M$ 是"1-semiseparable + WY 修正"。</p>
 <p>14 条 <code>[PASS]</code>。</p>
 <h2>练习</h2>
 <ol>
-<li>证明 $T = I - \beta kk^\top$ 的特征值是 ${1-\beta, 1,\dots,1}$（用秩1扰动的特征值性质）。</li>
+<li>证明 $\lVert k\rVert = 1$ 时 $T = I - \beta kk^\top$ 的特征值是 ${1-\beta, 1,\dots,1}$
+   （用秩1扰动的特征值性质；$\lVert k\rVert \ne 1$ 时应为 $1-\beta\lVert k\rVert^2$）。</li>
 <li>验证 $\beta{=}1$ 时 $P^2 = P$；$\beta{=}2$ 时 $H^2=I$ 且 $H^\top H = I$。</li>
 <li>手动展开 $C{=}3$ 的 WY 表示，写出 $w_0,w_1,w_2$ 的显式表达式。</li>
 <li>把 <code>gdn_chunkwise</code> 改成支持 padding（$N$ 不整除 $C$），验证与 naive 一致。</li>
@@ -3383,7 +3488,18 @@ if __name__ == &quot;__main__&quot;:
 <p>$$ y_t = \sum_{i \in \mathrm{TopK}(x_t)} g_i(x_t)\, E_i(x_t) $$</p>
 <p>把 $T$ 个 token 按它们被分配到的专家<strong>排序</strong>后，整层可以写成一个矩阵表达式：</p>
 <p>$$ \boxed{Y = P^\top\, \mathrm{blkdiag}\big(E_0, E_1, \dots, E_{E-1}\big)\, P\, X} $$</p>
-<p>其中 $P$ 是路由决定的<strong>置换矩阵</strong>（每行每列恰一个 1）。拆开看：</p>
+<p>其中 $P$ 是路由决定的<strong>置换矩阵</strong>（每行每列恰一个 1）。</p>
+<blockquote>
+<p><strong>这个式子是结构示意，逐字读会有两处形状对不上</strong>：
+① topk 后每个 token 要复制 $k$ 份，所以 $P$ 实际作用在 $T\cdot k$ 行上（代码里
+<code>x.unsqueeze(1).expand(T, topk, d).reshape(T*topk, d)</code>），不是 $T$ 行；
+② $\mathrm{blkdiag}(E_e)$ 只有当每个专家恰好分到 1 个 token 时才是标准的 $(Ed)\times(Ed)$ 矩阵，
+各专家块高 $n_e$ 不等时它是"块高不等的分块对角算子"。要写成单个矩阵乘，
+得先把 $X$ 复制 $E$ 份并用 one-hot 掩码只留自己专家那一段（代码 <code>moe_blockdiag</code> 的
+<code>Xext</code> 形状 $(T, E\cdot d)$ 就是这么来的）。
+忽略这两点，把它当成"重排 → 各块各算各的 → 还原"的紧凑写法即可。</p>
+</blockquote>
+<p>拆开看：</p>
 <table>
 <thead>
 <tr>
@@ -3425,7 +3541,7 @@ if __name__ == &quot;__main__&quot;:
   且每个 GEMM 的 $M$ 很小 → 算术强度低。</li>
 </ul>
 <h3>(b) <code>moe_grouped</code>：排序 + GroupGEMM</h3>
-<pre><code class="language-python">order   = torch.argsort(expert_id)            # 稳定排序，同专家聚在一起
+<pre><code class="language-python">order   = torch.argsort(expert_id)            # 同专家聚在一起（不保证稳定，见下）
 counts  = torch.bincount(expert_id, minlength=E)
 offsets = torch.cumsum(counts) - counts       # 每个专家块的起始位置
 xs      = x[order]                            # 重排后的输入（连续！）
@@ -3433,16 +3549,23 @@ xs      = x[order]                            # 重排后的输入（连续！�
 </code></pre>
 <ul>
 <li>优点：输入连续，能用上高效 GEMM；kernel 数量可控（甚至可以打包成一个 kernel）；</li>
-<li>关键：<code>order</code> 是<strong>稳定排序</strong>（<code>argsort</code> 对相同 key 保持原顺序），所以反置换 <code>argsort(order)</code> 能还原。</li>
+<li>关键：<code>order</code> 是 <code>flat_id.argsort()</code>，反置换就是 <code>argsort(order)</code>（见 §5）。</li>
 </ul>
 <blockquote>
+<p>⚠️ 别把这件事归功于"稳定排序"：<code>torch.argsort</code> <strong>默认 <code>stable=False</code></strong>，
+相同 <code>expert_id</code> 的 token 之间不保证保持原顺序（实测 <code>ids.argsort() != ids.argsort(stable=True)</code>）。
+而 <code>argsort(order)</code> 是 <code>order</code> 的逆置换这件事与稳定性<strong>无关</strong>——对任意置换都成立，
+因为 <code>order[argsort(order)[i]] = i</code> 恒成立。稳定排序只影响组内顺序是否"好看"，不影响正确性。</p>
 <p>⚠️ 踩过的坑：路由权重 $g$ 必须跟着一起重排（或按 <code>order</code> 索引）。
-写成 <code>flat_w[order]</code> 才对；漏掉这一步会得到 <code>max|Δ| = 3.4e-01</code>（看起来"差不多"但其实是错的）。</p>
+写成 <code>flat_w[order]</code> 才对；漏掉这一步会拿到 <code>max|Δ| = 3.371e-01</code>
+（实测值；参考输出的量级是 $5.6\times10^{-1}$，所以它是"看着差不多、其实全错"）。</p>
 </blockquote>
 <h3>(c) <code>moe_blockdiag</code>：显式块对角</h3>
 <p>把 $\mathrm{blkdiag}(E_0,\dots,E_{E-1})$ 真的构造出来（或用 one-hot mask 索引），
 一次大矩阵乘。适合<strong>教学理解</strong>，实际不用（因为块对角矩阵是 $Ed \times Ed$ 的巨大稀疏矩阵）。</p>
-<p><code>ch08</code> 验证三者数值一致（<code>max|Δ| = 0</code>）。</p>
+<p><code>ch08</code> 验证三者数值一致：<code>moe_loop</code> vs <code>moe_grouped</code> 的 <code>max|Δ| = 0.000e+00</code>（逐位相同），
+<code>moe_loop</code> vs <code>moe_blockdiag</code> 的 <code>max|Δ| = 1.788e-07</code>（块对角版走的是另一条浮点求和路径，
+只有舍入级差异）。</p>
 <h2>3. Padding vs Ragged：GroupGEMM 的两个流派</h2>
 <p>各专家分到的 token 数<strong>不均</strong>（这就是负载不均衡），设最大块大小为 $M_{\max}$：</p>
 <table>
@@ -3466,36 +3589,56 @@ xs      = x[order]                            # 重排后的输入（连续！�
 </tr>
 </tbody>
 </table>
-<p><code>ch08</code> 实测（专家块大小 $[135, 129, 122, 126]$，即均衡时）：</p>
+<p><code>ch08</code> 的 <code>demo_padding_waste</code> 测得的是<strong>负载不均</strong>带来的浪费
+（$E{=}64$，平均每专家 256 个 token，所有块补齐到最大块 $M_{\max}$）：</p>
 <table>
 <thead>
 <tr>
-<th>对齐粒度</th>
-<th>padding 浪费</th>
+<th>负载不均衡度</th>
+<th>实际 token</th>
+<th>padding 后</th>
+<th>浪费 $(M_{\max}-\bar M)/\bar M$</th>
+<th>最大块 / 最小块</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>无对齐</td>
-<td>0%</td>
+<td>0.0（完全均衡）</td>
+<td>16384</td>
+<td>16384</td>
+<td>0.0%</td>
+<td>256 / 256</td>
 </tr>
 <tr>
-<td>对齐到 128 的倍数</td>
+<td>0.3</td>
+<td>16088</td>
+<td>21248</td>
 <td>32.1%</td>
+<td>332 / 183</td>
 </tr>
 <tr>
-<td>对齐到 256 的倍数</td>
+<td>0.6</td>
+<td>15801</td>
+<td>26176</td>
 <td>65.7%</td>
+<td>409 / 109</td>
 </tr>
 <tr>
-<td>对齐到 512 的倍数</td>
+<td>0.9</td>
+<td>15507</td>
+<td>31040</td>
 <td>100.2%</td>
+<td>485 / 36</td>
 </tr>
 </tbody>
 </table>
-<p><strong>结论</strong>：对齐粒度是把双刃剑——tensor core 要求 $M$ 是 8/16 的倍数才高效，
-但粒度太大会浪费一半以上算力。工程上一般取 <strong>$M$ 对齐到 64 或 128</strong>，
-或者用 ragged kernel（如 DeepGEMM 的做法）。</p>
+<p>注意这一栏是"补齐到最大块"的账，<strong>不是</strong>对齐粒度——两者是独立的两层开销。
+对齐那一层可以用 §1 那组块大小 $[135,129,122,126]$（总 512）单独算：
+补齐到最大块 135 只浪费 $540/512-1 = 5.5\%$，但对齐到 128 的倍数要浪费 $768/512-1 = 50\%$
+（对齐到 64 是 25%，对齐到 256 是 100%）。</p>
+<p><strong>结论</strong>：负载越不均，padding 浪费越大（不均衡度 0.9 时算力直接翻倍）；
+对齐粒度又是另一把双刃剑——tensor core 要求 $M$ 取 8/16/64 的倍数才高效，但粒度太大会再吃掉一半。
+工程上一般取 <strong>$M$ 对齐到 64 或 128</strong>，或者用 ragged kernel（如 DeepGEMM 的做法）把两层都省掉。</p>
 <h2>4. 负载均衡的辅助损失</h2>
 <p>如果不加约束，路由会塌缩（所有 token 都去少数几个专家）。经典辅助损失：</p>
 <p>$$ \mathcal{L}<em e="1">{aux} = \alpha \cdot E \sum</em> f_e\, P_e $$}^{E</p>
@@ -3834,7 +3977,7 @@ if __name__ == &quot;__main__&quot;:
 设备 2 的 token ──┤                 （各设备收到的数量不同 → 变长！）
 设备 3 的 token ──┘
 </code></pre>
-<p><strong>All-to-All 的定义</strong>：每个设备把发送缓冲的第 $j$ 块发给设备 $j$，同时从第 $j$ 个设备接收第 $i$ 块。
+<p><strong>All-to-All 的定义</strong>：设备 $i$ 把发送缓冲的第 $j$ 块发给设备 $j$，并从设备 $j$ 收下 $j$ 的第 $i$ 块。
 它就是一个<strong>块置换矩阵</strong>作用于分布式张量。</p>
 <p><code>ch09</code> 的 <code>simulate_alltoall</code> 在单进程里模拟：</p>
 <pre><code class="language-python">flat_x = x.repeat_interleave(topk, dim=0)    # ⚠️ token 被复制 topk 份！
@@ -3852,7 +3995,7 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 <p>设：$T$ token、topk=$k$、隐层 $d$、EP 度 $W$。</p>
 <p>每步发送量：$T \cdot k \cdot d \cdot (\text{bytes})$（bf16 = 2 字节）。
 往返（dispatch + combine）是 <strong>2 倍</strong>。</p>
-<p><code>ch09</code> 实测（$T{=}4096$, topk=2, $d{=}4096$, bf16）：</p>
+<p><code>ch09</code> 实测（$T{=}4096$, topk=2, $d{=}4096$, bf16；下表统一取<strong>单向 dispatch</strong> 口径，与代码打印一致）：</p>
 <table>
 <thead>
 <tr>
@@ -3862,7 +4005,7 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 </thead>
 <tbody>
 <tr>
-<td>通信量（dispatch + combine）</td>
+<td>通信量（单向 dispatch）</td>
 <td>67.1 MB</td>
 </tr>
 <tr>
@@ -3916,7 +4059,7 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 </tr>
 </tbody>
 </table>
-<p>e4m3 的<strong>相对精度</strong>：3 位尾数 ⇒ 有效数字约 $1 + 2^{-3}$，即相对步长 $2^{-3} = 12.5\%$？
+<p>e4m3 的<strong>相对精度</strong>：3 位尾数（含隐含位共 4 位精度）⇒ 约 1.2 个十进制有效数字（$\log_{10}2^4$），即相对步长 $2^{-3} = 12.5\%$？
 不对——尾数 $m$ 位意味着相对误差约 $2^{-(m+1)} = 2^{-4} = 6.25\%$（舍入到最近）。
 实际表现：</p>
 <ul>
@@ -3945,7 +4088,7 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 </tr>
 <tr>
 <td>相对误差</td>
-<td>全程近似恒定（~6%）</td>
+<td>相对步长上界 6.25%（$2^{-4}$），高斯 RMS 实测 2.65%</td>
 <td>与幅度成反比（小数相对误差爆炸）</td>
 </tr>
 <tr>
@@ -3973,12 +4116,12 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 <tr>
 <td>FP8 per-tensor</td>
 <td><strong>27.7%</strong></td>
-<td>——</td>
+<td>2.636%</td>
 </tr>
 <tr>
 <td>INT8 per-tensor</td>
 <td><strong>100.0%</strong></td>
-<td>——</td>
+<td>0.998%</td>
 </tr>
 <tr>
 <td>FP8 block-wise (128)</td>
@@ -3992,7 +4135,7 @@ topk=2 时每个 token 去 2 个专家，发送缓冲是 $2T$ 行而不是 $T$ �
 </tr>
 </tbody>
 </table>
-<p><strong>这就是 block-wise scaling 的全部动机</strong>：一个 scale 管不住 $10^5$ 的动态范围，
+<p><strong>这就是 block-wise scaling 的全部动机</strong>：一个 scale 管不住约 $5\times 10^4$ 的动态范围（实测 $5.19\times10^4$），
 把张量切成 128 元素的小块、每块一个 scale，误差直接降一个数量级。</p>
 <blockquote>
 <p>DeepEP / DeepGEMM 用的正是 <strong>per-128-element block-wise scaling</strong>（配合 Hopper 的
@@ -4262,7 +4405,7 @@ if __name__ == &quot;__main__&quot;:
 <p><strong>推论</strong>：低秩近似的效果完全由<strong>奇异值的尾部能量</strong>决定。
 定义"保留能量比"：</p>
 <p>$$ \eta(r) = \frac{\sum_{i\le r}\sigma_i^2}{\sum_i \sigma_i^2} $$</p>
-<p><code>ch10</code> 第 1 节构造一个谱按 $\exp(-i/6)$ 衰减的矩阵，实测截断 SVD 的误差
+<p><code>ch10</code> 第 1 节构造一个谱按 $(i+1)^{-1.2}$ 衰减的矩阵，实测截断 SVD 的误差
 与 $\sqrt{\sum_{i&gt;r}\sigma_i^2}$ 吻合（<code>max|Δ| ≈ 1.2e-07</code>）。</p>
 <h3>LoRA 的秩怎么选</h3>
 <p>LoRA 假设微调的更新 $\Delta W$ 是低秩的：$\Delta W = BA$，$B\in\mathbb{R}^{d_{out}\times r}, A\in\mathbb{R}^{r\times d_{in}}$。</p>
@@ -4271,11 +4414,11 @@ if __name__ == &quot;__main__&quot;:
 <li>$r$ 太大 → 参数量与全量微调接近，失去意义。</li>
 </ul>
 <p>经验法则：<strong>看 $\Delta W$ 的谱衰减速度</strong>。如果前 $r$ 个奇异值就吃掉 90% 能量，
-$r$ 就够了。<code>ch10</code> 第 2 节用真实谱衰减（指数衰减 vs 均匀谱）对比了不同 $r$ 的逼近误差。</p>
+$r$ 就够了。<code>ch10</code> 第 2 节构造了一个谱按 $\exp(-i/6)$ 指数衰减的 $\Delta W$，对比不同 $r$ 的逼近误差。</p>
 <blockquote>
 <p>注意：要评估的是 <strong>$\Delta W$ 的谱</strong>，不是 $W$ 的谱！
 预训练权重 $W$ 的谱通常很"平"（信息均匀分布），而 $\Delta W$ 的谱往往很"尖"。
-<code>ch10</code> 里特意对比了"重建整个 $W$"和"重建 $\Delta W$"两种误差。</p>
+<code>ch10</code> 第 2 节低秩重建的对象就是 $\Delta W$（误差按"增量对输出的影响"统计）。</p>
 </blockquote>
 <h2>2. MLA：多层注意力 = 把 KV 压进一个低秩潜向量</h2>
 <p><strong>MLA（Multi-head Latent Attention，DeepSeek-V2/V3）</strong> 的核心：
@@ -4286,10 +4429,12 @@ $r$ 就够了。<code>ch10</code> 第 2 节用真实谱衰减（指数衰减 vs 
 <h3>吸收版（推理时的关键技巧）</h3>
 <p>QK 方向：</p>
 <p>$$ q^{(h)\top} k^{(h)} = \big(W_{UQ}^{(h)} c_q\big)^\top \big(W_{UK}^{(h)} c_{KV}\big)
-= c_q^\top \underbrace{\big(W_{UQ}^{(h)\top} W_{UK}^{(h)}\big)}<em KV="KV">{\text{预先合并成一个 } d_c\times d_c} c</em> $$</p>
-<p>把两个矩阵<strong>预先乘好</strong>，推理时直接用合并矩阵 —— 省掉一次投影。</p>
+= c_q^\top \underbrace{\big(W_{UQ}^{(h)\top} W_{UK}^{(h)}\big)}<em cq="cq">{\text{预先合并成一个 } d</em> $$}\times d_c} c_{KV</p>
+<p>把两个矩阵<strong>预先乘好</strong>，推理时直接用合并矩阵 —— 省掉一次投影。
+（形状：$W_{UQ}^{(h)}:d_{cq}\to d_h$、$W_{UK}^{(h)}:d_c\to d_h$，故合并结果是 $d_{cq}\times d_c$；
+DeepSeek-V3 的 $d_{cq}{=}1536,\ d_c{=}512$，即 $1536\times512$，代码里是 <code>(H, d_cq, d_c)</code>。）</p>
 <p>输出方向（更妙）：</p>
-<p>$$ \sum_h W_O^{(h)}\, A^{(h)}\, \big(W_{UV}^{(h)} c_{KV}\big)
+<p>$$ \sum_h \big(A^{(h)}\, W_{UV}^{(h)}\, c_{KV}\big)\, W_O^{(h)}
 = \sum_h \big(A^{(h)} c_{KV}\big)\underbrace{\big(W_{UV}^{(h)} W_O^{(h)}\big)}_{\text{合并}} $$</p>
 <p>注意 $A^{(h)}$ 是 $N\times N$ 的注意力矩阵，这一步把"先投影 V 再乘 $W_O$"
 换成了"先做 attention 加权再一次性投影" —— 顺序换了，<strong>乘的矩阵变少了</strong>。</p>
@@ -4304,11 +4449,12 @@ $r$ 就够了。<code>ch10</code> 第 2 节用真实谱衰减（指数衰减 vs 
 k = [k^{C},\ k^{R}] $$}</p>
 <ul>
 <li>$q^C, k^C$ 走低秩潜向量（可吸收、可压缩）；</li>
-<li>$q^R, k^R$（$d_r = 64$ 维）单独做 RoPE，<strong>每个头都要缓存</strong>。</li>
+<li>$q^R$ 是查询侧（不必缓存）；$k^R$（$d_r = 64$ 维）单独做 RoPE，<strong>且各头共享一份</strong>
+  （代码里 <code>W_KR: d_model → d_r</code>，与头数无关）。</li>
 </ul>
-<p>所以 MLA 的 KV Cache = $d_c + d_r$ per token，而不是 $2\cdot H\cdot D$。</p>
+<p>所以 MLA 的 KV Cache = $d_c + d_r$ per token（只多一个 $d_r$），而不是 $2\cdot H\cdot D$。</p>
 <h3>KV Cache 对比</h3>
-<p><code>ch10</code> 实测（$H{=}8, D{=}64, d_c{=}32, d_r{=}16$，教学用小模型）：</p>
+<p><code>ch10</code> 实测（$H{=}8, d_h{=}32, d_c{=}64, d_r{=}32$，教学用小模型）：</p>
 <table>
 <thead>
 <tr>
@@ -4406,7 +4552,8 @@ k = [k^{C},\ k^{R}] $$}</p>
 <p>两个观察：</p>
 <ol>
 <li><strong>均匀量化的理论误差</strong> $\approx \dfrac{\mathrm{step}/\sqrt{12}}{\sigma}$，$\mathrm{step} = \dfrac{2\,\mathrm{amax}}{2^b-1}$。
-   对高斯权重，INT8 ≈ 1%，INT4 ≈ 10% —— 和实测吻合。</li>
+   对高斯权重（$\mathrm{amax}\approx4.76\sigma$），INT8 ≈ 1%，INT4 ≈ 18.3%（≈16%~19%）—— 与实测的
+   1.080% / 19.586% 吻合。</li>
 <li><strong>光靠均匀量化，INT4 的 19.6% 是完全不能用的</strong>。
    真实模型能跑 INT4 甚至 INT2，靠的是把目标从 $\lVert W-\hat W\rVert_F$ 换掉（见下节）。</li>
 <li>group 越小误差越低，但 scale 的存储和访存开销越大 —— 实践中 group=32/64/128 是常见折中。</li>
@@ -4423,8 +4570,10 @@ k = [k^{C},\ k^{R}] $$}</p>
 <li><strong>AWQ</strong> 据此对重要通道乘一个放大系数 $s$（再在别处除回来），等效于给它们更多"量化级数"；</li>
 <li><strong>GPTQ</strong> 则是逐个量化权重，并把当前权重的量化误差<strong>按 $H^{-1}$ 分配到后面的未量化权重</strong>上（OBQ 的加速版）。</li>
 </ul>
-<p><code>ch10</code> 用对角 Hessian 的加权目标演示了这一点：同样位宽下，Hessian 加权的目标
-在"模型输出误差"上明显优于普通 Frobenius 目标。</p>
+<blockquote>
+<p>注：<code>ch10</code> 第 4 节只把上面的加权目标写成了说明文字，并未实现对比实验
+—— 实现"对角 Hessian 加权量化 vs 普通 Frobenius 量化"留作练习（见练习 5）。</p>
+</blockquote>
 <h2>4. 三个技巧的关系</h2>
 <table>
 <thead>
@@ -4637,14 +4786,14 @@ def demo_mla():
     mla_c = d_c + d_r
     for name, v_ in [(&quot;MHA (8 头)&quot;, mha), (&quot;GQA (2 组)&quot;, gqa4), (&quot;MQA (1 头)&quot;, mqa), (&quot;MLA&quot;, mla_c)]:
         print(f&quot;    {name:&lt;14}: {v_:&gt;6d} 维/token   相对 MHA 省 {mha/v_:&gt;5.1f}x&quot;)
-    print(&quot;\n  真实规模对照（DeepSeek-V2 级别: H=128, d_h=128, d_c=512, d_r=64）:&quot;)
+    print(&quot;\n  真实规模对照（DeepSeek-V3 级别: H=128, d_h=128, d_c=512, d_r=64）:&quot;)
     mha_big, mla_big = 2 * 128 * 128, 512 + 64
     print(f&quot;    MHA: {mha_big} 维/token → MLA: {mla_big} 维/token，省 {mha_big/mla_big:.1f}x&quot;
           f&quot;（且 MLA 的表达力还更强，因为 latent 是各头共享的高秩压缩）&quot;)
     print(&quot;  → MLA 把 KV 压到 latent，推理时靠【矩阵吸收】直接用 latent 计算，不需要展开回 H·d_h&quot;)
     print(&quot;  → 吸收的两个恒等式（都是结合律）：&quot;)
     print(&quot;     score: (W_UQ c_q)ᵀ(W_UK c_kv) = c_qᵀ (W_UQᵀ W_UK) c_kv      ← 预计算 (d_cq × d_c)&quot;)
-    print(&quot;     out  : Σ_h W_O_h A_h (W_UV_h c_kv) = Σ_h (A_h c_kv)(W_UV_h W_O_h) ← 结合律换序&quot;)
+    print(&quot;     out  : Σ_h (A_h W_UV_h c_kv) W_O_h = Σ_h (A_h c_kv)(W_UV_h W_O_h) ← 结合律换序&quot;)
     print(&quot;  → 代价：RoPE 不能进 latent（位置信息会被低秩抹掉），所以要额外解耦 d_r 维&quot;)
 
 
@@ -4671,7 +4820,7 @@ def demo_quant_weights():
         errs = [((x @ Wi.T - ref).norm() / ref.norm()).item() * 100 for Wi in row]
         print(f&quot;    {bits:&gt;5} {errs[0]:&gt;21.3f}% {errs[1]:&gt;13.3f}% {errs[2]:&gt;13.3f}%&quot;)
     print(&quot;  → 均匀量化的理论误差 ≈ (step/√12)/σ，step = 2·amax/(2^b-1)：&quot;)
-    print(&quot;     对高斯权重 INT8 ≈ 1%，INT4 ≈ 10% —— 光靠均匀量化 INT4 是不够的&quot;)
+    print(&quot;     对高斯权重（amax ≈ 4.76σ）INT8 ≈ 1%，INT4 ≈ 18% —— 光靠均匀量化 INT4 是不够的&quot;)
     print(&quot;  → 真实模型能跑 INT4/INT2，靠的是把目标从 ‖W-Ŵ‖ 换成【加权】目标：&quot;)
     print(&quot;     GPTQ/AWQ:  min ‖(W-Ŵ)X‖²_F  ≈  min Σ_j H_jj (W_j - Ŵ_j)²   (H = XᵀX 的 Hessian)&quot;)
     print(&quot;     即：重要的权重（对应激活方差大的通道）量化得更精细，不重要的可以更粗&quot;)
@@ -4725,7 +4874,9 @@ if __name__ == &quot;__main__&quot;:
 <p>$$ \begin{aligned} A &amp;\xrightarrow{\text{列切}} [A_1\ \cdots\ A_n] &amp;&amp;\Rightarrow XA = [XA_1\ \cdots\ XA_n]\ \text{（无需通信）}\ B &amp;\xrightarrow{\text{行切}} [B_1; \cdots; B_n] &amp;&amp;\Rightarrow \text{每卡算 } \mathrm{GeLU}(XA_i)B_i\ Y &amp;= \sum_i \mathrm{GeLU}(XA_i)B_i &amp;&amp;\Rightarrow \text{最后 all-reduce 一次} \end{aligned} $$</p>
 <p><strong>为什么 GeLU 不用通信？</strong> 因为 GeLU 是<strong>逐元素</strong>非线性，它要求"被切的那一维是完整的"。
 $A$ 按列切 ⇒ $XA$ 按列分成 $n$ 块，<strong>每块内部完整</strong> ⇒ GeLU 可以就地算。</p>
-<p>反过来（$A$ 行切、$B$ 列切）：$XA$ 是部分和，要先 all-reduce 才能过 GeLU ⇒ <strong>多一次通信</strong>。</p>
+<p>反过来（$A$ 行切、$B$ 列切）：$XA$ 是部分和，要先 all-reduce 才能过 GeLU，
+之后 $B$ 列切的输出天然拼接 —— <strong>通信次数同样是 1 次</strong>，但 all-reduce 的是中间激活
+$T\times 4d$，量从 $T\times d$ 变成 <strong>4 倍</strong>（见下表：128.0 KB vs 32.0 KB）。</p>
 <p><code>ch11</code> 实测通信量（$T{=}64, d{=}256$，bf16）：</p>
 <table>
 <thead>
@@ -4740,7 +4891,7 @@ $A$ 按列切 ⇒ $XA$ 按列分成 $n$ 块，<strong>每块内部完整</strong
 <td>32.0 KB</td>
 </tr>
 <tr>
-<td>一次 all-gather（中间激活 $T\times 4d$）</td>
+<td>一次 all-reduce（中间激活 $T\times 4d$）</td>
 <td>128.0 KB</td>
 </tr>
 </tbody>
@@ -4757,7 +4908,9 @@ $A$ 按列切 ⇒ $XA$ 按列分成 $n$ 块，<strong>每块内部完整</strong
     在线 softmax 更新 (m, l, O)
 O = O / l
 </code></pre>
-<p><strong>关键</strong>：每个设备上的注意力矩阵永远只有 $(N/W)^2$ 大小 —— <strong>显存与 $N$ 无关</strong>（对固定 $W$）。</p>
+<p><strong>关键</strong>：每个设备上的注意力矩阵永远只有 $(N/W)^2$ 大小 —— 对固定 $W$ 它是全局
+$N^2$ 的 $1/W^2$（<strong>仍随 $N$ 二次增长</strong>）。只有当保持 $N/W$ 不变、即设备数随 $N$
+同比增加时，单卡显存才与总长无关。</p>
 <p><code>ch11</code> 验证：</p>
 <table>
 <thead>
@@ -4862,7 +5015,7 @@ O = O / l
 </tr>
 </tbody>
 </table>
-<p><strong>最要紧的一句话</strong>：把 $N$ 从 256 换成 128K，attention 项涨 $(128\text{K}/256)^2 = 25$ 万倍，
+<p><strong>最要紧的一句话</strong>：把 $N$ 从 256 换成 128K，attention 项涨 $(128\text{K}/256)^2 = 512^2 = 26.2$ 万倍，
 其它项只涨 500 倍。<strong>长上下文的一切问题都是 attention 的 $O(N^2)$ 问题。</strong></p>
 <h2>4. 全书回顾：一条主线</h2>
 <pre><code>CH01 布局/强度  ──→  知道瓶颈在访存
@@ -4957,11 +5110,12 @@ def demo_tensor_parallel():
     print(&quot;\n  关键：GeLU 是逐元素非线性，它要求【被切的那一维是完整的】&quot;)
     print(&quot;        A 按列切 ⇒ XA 的中间结果按列分成 world 块，每块内部完整 ⇒ GeLU 可以就地算&quot;)
     print(&quot;        B 按行切 ⇒ 每块的 (4d/w × d) 与该中间块对齐 ⇒ 各自得到一个 (·,d) 的部分和&quot;)
-    print(&quot;        ⇒ 只在最后 all-reduce 一次。若 A 行切、B 列切，则中间要 all-gather，多一次通信&quot;)
+    print(&quot;        ⇒ 只在最后 all-reduce 一次。若 A 行切、B 列切，通信次数仍是 1 次，&quot;)
+    print(&quot;          但 all-reduce 的是中间激活 T×4d（量是输出的 4 倍）&quot;)
 
     # (d) 通信量对比
     print(&quot;\n  一次 MLP 的通信量（T token）：&quot;)
-    for name, elem in [(&quot;一次 all-reduce (输出)&quot;, 64 * d_in), (&quot;一次 all-gather (中间激活)&quot;, 64 * 4 * d_in)]:
+    for name, elem in [(&quot;一次 all-reduce (输出)&quot;, 64 * d_in), (&quot;一次 all-reduce (中间激活)&quot;, 64 * 4 * d_in)]:
         print(f&quot;    {name:&lt;28}: {elem*2/1024:.1f} KB (bf16)&quot;)
     print(&quot;    → 所以 Megatron 选择「列切 + 行切」把通信压到最小&quot;)
 
@@ -5142,7 +5296,7 @@ def demo_capstone():
     print(f&quot;    投影 FLOPs       : {flops_proj/1e6:.1f} MFLOP&quot;)
     print(f&quot;    MLP FLOPs        : {flops_mlp/1e6:.1f} MFLOP&quot;)
     print(f&quot;    KV Cache(GQA)    : {2*Hkv*d_h*N*2/1024:.1f} KB/序列 (bf16)&quot;)
-    print(&quot;  → 把 N 换成 128K，attention 项会涨 (128K/256)² = 25 万倍，其它只涨 500 倍&quot;)
+    print(&quot;  → 把 N 换成 128K，attention 项会涨 (128K/256)² = 512² = 26.2 万倍，其它只涨 500 倍&quot;)
 
 
 def main():

@@ -141,7 +141,7 @@ def demo_relativity():
             a, b_ = torch.randn(d), torch.randn(d)
             emp.append((a @ b_) * (a @ rope(b_, delta)))
         emp = torch.tensor(emp).mean().item()
-        print(f"    Δ={delta:>6}: 解析 = {analytic:+.4f}   经验 E[⟨q,k⟩⟨q,ρ(Δ)k⟩]/‖q‖²‖k‖² = {emp/d:+.4f}")
+        print(f"    Δ={delta:>6}: 解析 = {analytic:+.4f}   经验 Corr = E[⟨q,k⟩⟨q,ρ(Δ)k⟩]/d = {emp/d:+.4f}")
     print("  → 相关性随距离衰减但有振荡（低频维度周期长），这就是 RoPE 的局部性先验")
 
 

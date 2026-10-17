@@ -160,7 +160,8 @@ def demo_head_merge():
     check("逐 head GEMM == 合并后 batched GEMM", outA, outB)
     tA = timer(lambda: torch.stack([Q[:, i] @ W[i].T for i in range(H)], dim=1))
     tB = timer(merged)
-    print(f"  {H} 次小 GEMM: {tA:.1f} ms  →  1 次 bmm({Bn*H} 个 batch): {tB:.1f} ms  (快 {tA/tB:.2f}x)")
+    print(f"  {H} 次小 GEMM: {tA:.1f} ms  →  1 次 bmm({H} 个 batch，每批 {Bn*N}x{D} @ {D}x{D}): "
+          f"{tB:.1f} ms  (快 {tA/tB:.2f}x)")
     print("  → GPU 上差别更大：kernel launch 开销 + 每个小 GEMM 都读一遍权重")
 
 

@@ -31,7 +31,8 @@ $$ R(\theta) = \begin{pmatrix}\cos\theta & -\sin\theta\\ \sin\theta & \cos\theta
 
 最后一条在代码里很实用：RoPE 的梯度不需要额外推导，把 $q$ 旋转 $-m$ 即可。
 
-`ch03` 第 1 节验证 $0^\circ/30^\circ/90^\circ/180^\circ/270^\circ$ 下的 $\lVert R^\top R - I\rVert \approx 10^{-8}$、$\det = +1$。
+`ch03` 第 1 节验证 $0^\circ/30^\circ/90^\circ/180^\circ/270^\circ$ 下的 $\lVert R^\top R - I\rVert$：
+实测五个角度**全部打印为 `0.00e+00`**（fp32 下数值上就是 0，$\le 10^{-7}$），$\det = +1.000000$。
 
 ## 3. 高维：分块对角 = $d/2$ 个独立旋转平面
 
@@ -74,9 +75,13 @@ def rotate_half(x):
     x1, x2 = x.chunk(2, -1)                 # 前半 / 后半
     return torch.cat((-x2, x1), -1)
 
-def apply_rope(x, cos, sin):                # cos/sin 形状 (..., d/2)
-    return x * cos.cat((cos, cos)) + rotate_half(x) * sin.cat((sin,sin))
+def apply_rope(x, cos, sin):                # x: (..., d)；cos/sin: (..., d/2)，先各自复制成 (..., d)
+    return x * torch.cat((cos, cos), -1) + rotate_half(x) * torch.cat((sin, sin), -1)
 ```
+
+（`cos.cat(...)` 不是合法 PyTorch；`cat` 是 `torch` 的模块级函数，张量本身没有这个方法。
+代码里的 `apply_rope` 直接吃已经拼好的 `(..., d)` 的 `cos/sin`，即 `x * cos + rotate_half(x) * sin`，
+与上式等价。）
 
 或者更省：直接
 
@@ -106,7 +111,14 @@ $$ z_i \mapsto z_i \cdot e^{\mathrm{i} m\theta_i} $$
 
 从 $\rho(m)^\top\rho(n)=\rho(n-m)$ 可得（对随机 $q,k$）：
 
-$$ \mathbb{E}\big[\langle q,k\rangle \cdot \langle q, \rho(\Delta)k\rangle\big] \big/ (\lVert q\rVert^2\lVert k\rVert^2) = \frac{2}{d}\sum_{i=0}^{d/2-1}\cos(\Delta\,\theta_i) $$
+$$ \mathrm{Corr}\big(\langle q,k\rangle,\ \langle q,\rho(\Delta)k\rangle\big)
+= \frac{1}{d}\,\mathbb{E}\big[\langle q,k\rangle \cdot \langle q, \rho(\Delta)k\rangle\big]
+= \frac{\mathrm{tr}\,\rho(\Delta)}{d} = \frac{2}{d}\sum_{i=0}^{d/2-1}\cos(\Delta\,\theta_i) $$
+
+（分母是 $d$ 不是 $\lVert q\rVert^2\lVert k\rVert^2=d^2$：$q,k$ 各分量独立同分布时
+$\mathbb{E}[(q^\top k)(q^\top\rho k)]=\mathrm{tr}\,\rho$，而两个随机内积各自的方差都是 $d$，
+所以相关系数 $=\mathrm{tr}\,\rho/d$。按 $d^2$ 归一化会在 $\Delta=0$ 时得到 $1/64$，
+与下面表格里的 1.000 矛盾。）
 
 `ch03` 第 3 节把这个**解析曲线**和**蒙特卡洛估计**并列打印：
 
@@ -133,19 +145,25 @@ $$ \mathrm{base}' = \mathrm{base}\cdot s^{\,d/(d-2)} $$
 对不同频带用不同强度的插值，中间用斜坡过渡。设波长 $\lambda_i = 2\pi/\theta_i$，比值 $r = L_{train}/\lambda_i$：
 
 $$ \gamma_i = \mathrm{clip}\!\left(\frac{r - \alpha}{\beta - \alpha},\ 0,\ 1\right),\qquad
-\theta_i' = \begin{cases}\theta_i, & \gamma_i = 0\ (r\le\alpha)\\ \dfrac{\theta_i}{(1-\gamma_i)/s + \gamma_i}, & \text{otherwise}\end{cases} $$
+\theta_i' = \theta_i\cdot\left[\frac{1-\gamma_i}{s} + \gamma_i\right] $$
+
+（这正是 `ch03.py` 里 `yarn_correction` 的返回值 $(1-\gamma)\cdot L_{train}/L_{test} + \gamma$，
+再乘到 $\theta_i$ 上：$\gamma=0$ 时 $\theta'_i=\theta_i/s$ 是**纯插值**，$\gamma=1$ 时 $\theta'_i=\theta_i$ 不动。
+⚠️ 若写成 $\theta_i\big/\big[\tfrac{1-\gamma_i}{s}+\gamma_i\big]$ 就把除号写反了 —— $\gamma=0$ 会给出
+$\theta_i\cdot s$，那是外推而不是插值。）
 
 直觉：
 
-- $r \le \alpha$（波长**短**于训练长度 → 已见过足够多周期）→ 不插值，直接外推；
-- $r \ge \beta$（波长**长**于训练长度 → 从未见过一个完整周期）→ 完全插值；
+- $r \le \alpha$：$\lambda_i \gtrsim L_{train}$（波长**长**，训练时**没走完一个周期**）→ $\gamma=0$ → **完全插值** $\theta_i/s$；
+- $r \ge \beta$：$\lambda_i \ll L_{train}$（波长**短**，训练时已见过很多周期）→ $\gamma=1$ → **不插值**，原样外推；
 - 中间 → 斜坡过渡。
 
 再加一个 attention 温度的修正（$t = 0.1\ln s + 1$）补偿熵的变化。
 
 ## 8. 一个反例：不正交会发生什么
 
-`ch03` 第 6 节故意用一个**非正交**的"伪位置矩阵" $A(m)$（比如带上缩放的对角矩阵）替换 $\rho(m)$：
+`ch03` 第 6 节故意用一个**非正交**的"伪位置矩阵" $A(m)$ 替换 $\rho(m)$ —— 代码里就是
+`A = torch.randn(d, d) * 0.1`，即一个**随机的、带 0.1 缩放的稠密非正交矩阵**（不是对角矩阵）：
 
 - $\langle A(m)q, A(n)k\rangle$ **不再**只依赖 $n-m$；
 - $\lVert A(m) q\rVert \ne \lVert q\rVert$，点积尺度随位置漂移 → 等价于随位置变化的温度。

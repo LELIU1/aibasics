@@ -18,7 +18,10 @@
 | MLP down | $a W_{down}$ | 962.1 | 21.2% |
 | 合计 | | 4535.5 | 100% |
 
-（表中为相对份额，未乘 FLOPs 的系数 2，不影响占比结论。）
+（表中数值即 `ch02.py` 第 1 节的打印值。注意**计数口径并不统一**：attention 两行含 MAC 系数 2
+（$2HBN^2D$），QKV / O / MLP 各行按"矩阵乘法次数"计数未乘 2。所以绝对值可直接用，但
+attention 的占比被高估约 2×：若统一按 $2MNK$ 计，合计约 $8521$ GFLOP，attention 两行合计
+占比降到约 6.5%（每行 3.2%）。）
 
 **注意 attention 占比随 $N$ 的剧烈变化**（这是长上下文一切优化的根源）：
 
@@ -85,7 +88,8 @@ FLOPs 差别不大（因为 $r$ 很小），真正的收益是**少一次 kernel
 - $(QK^\top)V$：$2N^2d + 2N^2d$
 - $Q(K^\top V)$：$2Nd^2 + 2Nd^2$
 
-实测（$N{=}2048, d{=}64$）：$(QK^\top)V$ = 4295.0 MFLOP，$Q(K^\top V)$ = 67.1 MFLOP，**省 64×**。
+实测（$N{=}4096, d{=}64$，见 `ch02.py` 第 2 节）：$(QK^\top)V$ = 4295.0 MFLOP，
+$Q(K^\top V)$ = 67.1 MFLOP，**省 64×**。
 **但两者并不等价**（实测直接换序的最大偏差是 2479.7）—— 只有去掉 softmax 之后才能这么换
 （这正是 CH06 线性注意力的全部秘密）：
 
@@ -108,12 +112,19 @@ RMSNorm：
 
 $$ \mathrm{RMSNorm}(x) = \underbrace{\frac{x}{\mathrm{rms}(x)}}_{\text{归一化}} \odot \gamma $$
 
-$\gamma$ 作用在**输入维度**上（逐列缩放）。若后面紧跟 $y = \mathrm{RMSNorm}(x)W$，则
+$\gamma$ 作用在**输入维度**上（$x$ 的第 $j$ 个分量乘 $\gamma_j$）。记 $\hat x = x/\mathrm{rms}(x)$；
+下面统一用**代码里的写法** $y = h\,W^\top$（$W\in\mathbb R^{d_{out}\times d_{in}}$，$h$ 是归一化后的激活；
+它等价于教科书写法 $y=\hat x\,W$ 里的 $W\in\mathbb R^{d_{in}\times d_{out}}$ 取转置）。若 RMSNorm 后面
+紧跟这个线性层，则
 
-$$ (\hat x \odot \gamma) W = \hat x\, (\mathrm{diag}(\gamma)W) = \hat x\, W' \quad\Longrightarrow\quad W'_{ij} = \gamma_j W_{ij} $$
+$$ (\hat x \odot \gamma)\, W^\top = \hat x\,\big(\mathrm{diag}(\gamma)W^\top\big)
+= \hat x\,\big(W\,\mathrm{diag}(\gamma)\big)^\top = \hat x\,W'^\top
+\quad\Longrightarrow\quad W'_{ij} = \gamma_j\, W_{ij} $$
 
-即 **$\gamma$ 按列吸收进 $W$ 的行**……更准确地说：$W$ 的第 $j$ 行整体乘 $\gamma_j$，
-代码写 `W * gamma[None, :]`（$W$ 形状 $(d_{in}, d_{out})$，$\gamma$ 长度 $d_{in}$）。
+即 **$\gamma$ 按列吸收进 $W$**：$W$ 的第 $j$ **列**（也就是输入维 $j$）整体乘 $\gamma_j$，
+代码写 `W * gamma[None, :]`（代码里 $W$ 形状 $(d_{out}, d_{in})$，$\gamma$ 长度 $d_{in}$）。
+（若坚持 $y=\hat x\,W$ 的记法，$W\in\mathbb R^{d_{in}\times d_{out}}$，同一件事要写
+`W * gamma[:, None]`，即按**行**缩放。**代码是对的，别照这句去改代码。**）
 
 > ⚠️ 这是本教程踩过的坑：广播方向搞反会得到 `max|Δ| ~ 1.7e+02`。
 > 记住口诀：**$\gamma$ 乘在被求和的那一维上**。
@@ -135,7 +146,8 @@ $$ \mathrm{softmax}(s + c\mathbf 1) = \mathrm{softmax}(s) $$
 
 **访存减少 3.0×，FLOPs 一点没变。**
 
-实测（CPU）：`gelu(add(x))` 分两个 pass 是 17.6 ms，融合成单 pass 是 8.0 ms（**2.2×**）。
+实测（CPU）：`gelu(add(x))` 分两个 pass 约 9~10 ms，融合成单 pass 约 5 ms（**约 2×**）。
+**计时数值随机型/机器而异，看数量级和比值即可。**
 
 > 注意这里"不融合"的版本**已经是 GEMM 主导**（AI 仍有 227），所以只差 3×。
 > 真实的 norm / RoPE / 掩码这些纯逐元素算子，AI 只有 ~1，融合收益会大得多。
@@ -154,8 +166,10 @@ k_ = k.transpose(1, 2).reshape(H, B * N, D)
 S = torch.bmm(q_, k_.transpose(1, 2))        # (H, B*N, B*N)
 ```
 
-`ch02` 第 5 节实测（CPU）：32 次小 GEMM 121.5 ms vs 一次 `bmm(128 batch)` 112.5 ms ——
-**只快 1.08×**。这个数字有点"打脸"，但它恰好说明两件事：
+`ch02` 第 5 节实测（CPU）：32 次小 GEMM 约 105 ms vs 一次 `bmm` 约 100 ms ——
+**只快 1.05~1.10×**（**数值随机型/机器而异，同机多次跑也会抖**）。
+这里的 `bmm` 是 **batch $= H = 32$**，每批 $(B{\cdot}N)\times D = 8192\times128$ 乘 $128\times128$。
+这个数字有点"打脸"，但它恰好说明两件事：
 
 1. CPU 上 BLAS 本身对单 GEMM 已经很高效，收益主要来自**省掉 32 次 kernel launch**；
 2. **GPU 上差别会大得多**：除了 launch 开销，还有"每个小 GEMM 都要把权重重新读一遍"

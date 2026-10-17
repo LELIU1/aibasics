@@ -58,10 +58,17 @@ Gated DeltaNet 用 $\beta \in (0,1)$ ⇒ 沿 $k$ 方向**部分擦除**，其余
 $S_t$ 依赖 $S_{t-1}$，$N$ 步完全串行。GPU 上这意味着 $N$ 次 kernel launch，
 每次只做一个 $d\times d$ 的外积更新 —— 算术强度极低，完全跑不起来。
 
-必须 **chunkwise**：块内用矩阵运算并行，块间只做 $N/c$ 步状态传递。
+必须 **chunkwise**：块内用矩阵运算并行，块间只做 $N/C$ 步状态传递。
 难点在于：块内第 $t$ 个输出依赖**块内所有前面的转移矩阵的乘积**：
 
-$$ S_t = \Big(\prod_{i\le t} \alpha_i\big(I-\beta_i k_i k_i^\top\big)\Big) S_0 + \cdots $$
+$$ S_t = c_t\; S_0\Big(\prod_{i\le t}\big(I-\beta_i k_i k_i^\top\big)\Big) + \cdots,\qquad c_t = \prod_{i\le t}\alpha_i $$
+
+（$\cdots$ 是各步写入项 $\beta_jv_jk_j^\top$ 经后续转移矩阵传递后的贡献。）
+
+⚠️ 转移矩阵是**右乘**在 $S_0$ 上的：递推里 $S_{t-1}$ 在左、$(I-\beta_tk_tk_t^\top)$ 在右，
+所以展开是 $S_0$ 后面依次跟上 $i=0,1,\dots,t$ 的因子，不能写成 $\big(\prod_i\alpha_i(I-\beta_ik_ik_i^\top)\big)S_0$。
+这些因子互不交换，顺序反了结果就错了（实测：$d{=}4$、3 步，右乘误差 $1.3\times10^{-7}$，左乘误差 $6.9\times10^{-1}$）。
+§4 的 WY 推导正是按"新因子接在右边"的顺序做的：$P_t = P_{t-1}(I-\beta_tk_tk_t^\top)$。
 
 那个 $\prod_{i\le t}(I - \beta_i k_i k_i^\top)$ 是 $t$ 个 $d\times d$ 矩阵相乘 —— 必须**压缩**。
 
@@ -76,6 +83,11 @@ $$ \prod_{i\le t}\big(I - \beta_i k_i k_i^\top\big) = I - W_{0:t}\, K_{0:t}^\top
 其中 $W_{0:t}$ 的列 $w_i$ 满足下三角递推：
 
 $$ w_t = \beta_t\Big(k_t - \sum_{i<t}(k_i^\top k_t)\, w_i\Big) $$
+
+> **形状约定**（转置位置最容易搞反）：上式按**列**堆叠，即 $W,K\in\mathbb{R}^{d\times C}$、第 $i$ 列为 $w_i,k_i$。
+> 而代码里按**行**堆叠：$K\in\mathbb{R}^{C\times d}$ 的行 $i$ 是 $k_i^\top$（所以 §6 写 $G = KK^\top$），
+> $W\in\mathbb{R}^{C\times d}$ 的行 $i$ 是 $w_i^\top$，同一个矩阵在代码里写成 $I - W_{0:t}^\top K_{0:t}$。
+> 两种写法是同一个 $\sum_{i\le t}w_ik_i^\top$，但 $W^\top K$ 与 $WK^\top$ 不是一回事。
 
 写成矩阵就是一个**下三角线性系统**（记 Gram 矩阵 $G_{ij} = k_i^\top k_j$）：
 
@@ -127,7 +139,9 @@ $$ S \leftarrow c_{C-1}\Big(S - (WS_0^\top)^\top K + D^\top K\Big) $$
 
 > ⚠️ **本教程踩的最大的坑**：Step 4 的 $M$ 必须是 $\mathrm{tril}(Q K^\top)$（索引 $[t,j]$），
 > 不能写成 $\mathrm{tril}(K Q^\top)$ 再转置——虽然看起来"转置一下就行"，
-> 但 `tril` 的**方向**在转置后是反的，会导致 `max|Δ| ~ 4e+03`。
+> 但 `tril` 的**方向**在转置后是反的。误差量级随配置放大：
+> $N{=}64,d{=}16,C{=}16$ 时 `max|Δ| ≈ 1.9e+01`；$N{=}512,d{=}64,C{=}64$ 时 `max|Δ| ≈ 5e+03`
+> （状态 $S$ 被污染后会跨块累积，所以序列越长错得越离谱）。
 > 写这类代码时，把每个矩阵的**索引含义**写进注释：`[t,j] = 第 t 个 query 对第 j 个 key`。
 
 ## 7. 验证与性能
@@ -136,18 +150,24 @@ $$ S \leftarrow c_{C-1}\Big(S - (WS_0^\top)^\top K + D^\top K\Big) $$
 
 | 配置 | `max|Δ|` |
 |---|---|
-| $N{=}64, d{=}16, C{=}16$ | ~1.9e-06 |
-| $N{=}128, d{=}32, C{=}32$ | ~2.7e-06 |
-| $N{=}256, d{=}32, C{=}64$ | ~3.8e-06 |
-| $\alpha{=}1,\beta{=}1$ / $\alpha{=}1,\beta{=}0.5$ / $\alpha{=}0.9,\beta{=}0.9$ | 全部 PASS |
+| $N{=}64, d{=}16, C{=}16$ | 1.907e-06 |
+| $N{=}128, d{=}32, C{=}32$ | 1.907e-06 |
+| $N{=}256, d{=}32, C{=}64$ | 1.907e-06 |
+| $\alpha{=}1,\beta{=}1$ | 3.815e-06 |
+| $\alpha{=}1,\beta{=}0.5$ / $\alpha{=}0.9,\beta{=}0.9$ | 1.907e-06 |
+
+（三组配置打印出来**恰好都是** 1.907e-06，不是笔误：误差来自 fp32 求和顺序，量级与 $N,d$ 关系不大。）
 
 速度（CPU，$B{=}8, N{=}512, d{=}64, C{=}64$）：
 
 | 实现 | 耗时 |
 |---|---|
-| `gdn_naive`（逐 token） | 284 ms |
-| `gdn_chunkwise` | 12 ms |
-| **加速** | **24.5×** |
+| `gdn_naive`（逐 token） | ≈180–260 ms |
+| `gdn_chunkwise` | ≈6–7 ms |
+| **加速** | **≈26–42×** |
+
+CPU 计时抖动很大（同一台机器多次跑在 26×–42× 之间），所以这里只给区间；
+数量级结论是稳定的：chunkwise 快一个数量级以上。
 
 （GPU 上这个差距会更大，因为 chunkwise 能用上 tensor core。）
 
@@ -174,7 +194,8 @@ cd code && python ch07_gated_deltanet.py
 
 ## 练习
 
-1. 证明 $T = I - \beta kk^\top$ 的特征值是 $\{1-\beta, 1,\dots,1\}$（用秩1扰动的特征值性质）。
+1. 证明 $\lVert k\rVert = 1$ 时 $T = I - \beta kk^\top$ 的特征值是 $\{1-\beta, 1,\dots,1\}$
+   （用秩1扰动的特征值性质；$\lVert k\rVert \ne 1$ 时应为 $1-\beta\lVert k\rVert^2$）。
 2. 验证 $\beta{=}1$ 时 $P^2 = P$；$\beta{=}2$ 时 $H^2=I$ 且 $H^\top H = I$。
 3. 手动展开 $C{=}3$ 的 WY 表示，写出 $w_0,w_1,w_2$ 的显式表达式。
 4. 把 `gdn_chunkwise` 改成支持 padding（$N$ 不整除 $C$），验证与 naive 一致。

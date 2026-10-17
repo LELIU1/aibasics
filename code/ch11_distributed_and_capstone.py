@@ -55,11 +55,12 @@ def demo_tensor_parallel():
     print("\n  关键：GeLU 是逐元素非线性，它要求【被切的那一维是完整的】")
     print("        A 按列切 ⇒ XA 的中间结果按列分成 world 块，每块内部完整 ⇒ GeLU 可以就地算")
     print("        B 按行切 ⇒ 每块的 (4d/w × d) 与该中间块对齐 ⇒ 各自得到一个 (·,d) 的部分和")
-    print("        ⇒ 只在最后 all-reduce 一次。若 A 行切、B 列切，则中间要 all-gather，多一次通信")
+    print("        ⇒ 只在最后 all-reduce 一次。若 A 行切、B 列切，通信次数仍是 1 次，")
+    print("          但 all-reduce 的是中间激活 T×4d（量是输出的 4 倍）")
 
     # (d) 通信量对比
     print("\n  一次 MLP 的通信量（T token）：")
-    for name, elem in [("一次 all-reduce (输出)", 64 * d_in), ("一次 all-gather (中间激活)", 64 * 4 * d_in)]:
+    for name, elem in [("一次 all-reduce (输出)", 64 * d_in), ("一次 all-reduce (中间激活)", 64 * 4 * d_in)]:
         print(f"    {name:<28}: {elem*2/1024:.1f} KB (bf16)")
     print("    → 所以 Megatron 选择「列切 + 行切」把通信压到最小")
 
@@ -240,7 +241,7 @@ def demo_capstone():
     print(f"    投影 FLOPs       : {flops_proj/1e6:.1f} MFLOP")
     print(f"    MLP FLOPs        : {flops_mlp/1e6:.1f} MFLOP")
     print(f"    KV Cache(GQA)    : {2*Hkv*d_h*N*2/1024:.1f} KB/序列 (bf16)")
-    print("  → 把 N 换成 128K，attention 项会涨 (128K/256)² = 25 万倍，其它只涨 500 倍")
+    print("  → 把 N 换成 128K，attention 项会涨 (128K/256)² = 512² = 26.2 万倍，其它只涨 500 倍")
 
 
 def main():

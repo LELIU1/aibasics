@@ -12,7 +12,7 @@ CH02 说过：$(QK^\top)V$ 是 $O(N^2d)$，而 $Q(K^\top V)$ 是 $O(Nd^2)$ —�
 
 $$ o_t = \sum_{j\le t} (q_t^\top k_j)\, v_j = \underbrace{\Big(\sum_{j\le t} v_j k_j^\top\Big)}_{S_t}\, q_t $$
 
-定义**状态矩阵** $S_t \in \mathbb{R}^{d_v\times d_k}$：
+定义**状态矩阵** $S_t \in \mathbb{R}^{d_v\times d_k}$（行是 value 维、列是 key 维）：
 
 $$ \boxed{S_t = \sum_{j\le t} v_j k_j^\top = S_{t-1} + v_t k_t^\top} $$
 
@@ -20,8 +20,13 @@ $$ \boxed{S_t = \sum_{j\le t} v_j k_j^\top = S_{t-1} + v_t k_t^\top} $$
 
 | 视角 | 说法 |  einsum |
 |---|---|---|
-| 外积累加 | 每步加一个**秩1矩阵** $v_t k_t^\top$ | `bnk,bnv->bkv` |
+| 外积累加 | 每步加一个**秩1矩阵** $v_t k_t^\top$ | `bnv,bnk->bvk` |
 | 联想记忆 | $S$ 是 key→value 的**线性联想记忆** | $S k \approx v$ |
+
+> ⚠️ einsum 的下标顺序要和公式对齐：`S` 是 $d_v\times d_k$，所以输出脚标必须是 **`->bvk`**（先 $v$ 后 $k$），
+> 并且第一个输入放 $v$、第二个放 $k$。写成 `bnk,bnv->bkv` 得到的是 $S^\top\ (d_k\times d_v)$，
+> 后面 $o_t=S_t q_t$ 就乘不动了。代码里是 `torch.outer(V[t], K[t])`、`S @ Q[t]`、`Qc @ S.T`，
+> 自始至终都是 $d_v\times d_k$ 这一约定。
 
 **复杂度**：
 
@@ -65,12 +70,23 @@ coeff = lam ** (c - 1 - idx[:c].float())
 S = (lam ** c) * S + (Vc * coeff[:, None]).T @ Kc
 ```
 
-**对比 CH05**：FlashAttention 是"块内二次 + 无块间状态"（因为 softmax 的归一化是全局的，
-用 $m/\ell$ 递推）；线性注意力是"块内二次 + 块间状态传递"。
+**对比 CH05**：FlashAttention 也是"块内二次 + 块间传递"，但块间只传**两个标量** $m/\ell$
+（softmax 的归一化是全局的，用 running max / running sum 递推）；
+线性注意力块间传的是一个 $d\times d$ **状态矩阵**。
 CH07 的 Gated DeltaNet 会把两者**都用上**。
 
-复杂度：块内 $O(C c^2 d)$，块间 $O(C d^2)$，总 $O(N c d + N d^2/c)$，
-取 $c \approx \sqrt{N}$ 最优。
+复杂度（记块长 $c$、块数 $C=N/c$）：
+
+- 块内：每块 $O(c^2 d)$，$C$ 块合计 $O(N c d)$；
+- 块间：每块一次状态更新 $(d\times c)\times(c\times d)$ 是 $O(c d^2)$，$C=N/c$ 块合计 **$O(N d^2)$**；
+- 总 **$O(N c d + N d^2)$**（与 `ch06` 第 3 节的打印一致）。
+
+注意块间那项是 $O(Nd^2)$ 而**不是** $O(Nd^2/c)$——每块更新状态本身就要读 $c$ 个 token，
+块数变少（$c$ 变大）并不能把这一项摊薄。
+
+所以 $c$ 不由"最小化总 FLOPs"决定（上式对 $c$ 单调增，不存在 $\sqrt N$ 之类的最优点），
+而是由**并行度**决定：$c$ 要大到块内 matmul 能打满 tensor core，又要小到 $N/c$ 个块
+能填满 SM 数量。这也是为什么 `ch06` 的代码注释写的是"串行步数从 $N$ 降到 $N/c$"。
 
 ## 4. 核特征映射：用特征逼近 softmax
 
@@ -90,16 +106,27 @@ $$ \phi(x) = \frac{e^{\lVert x\rVert^2/2}}{\sqrt{D}}\sqrt{2}\,\big(\cos(xW + b)\
 
 这是 **Random Fourier Features** 对 RBF 核的无偏估计：
 
-$$ \mathbb{E}\big[\phi(q)^\top\phi(k)\big] = e^{q^\top k} \cdot e^{-\lVert q\rVert^2/2 - \lVert k\rVert^2/2} $$
+由 $\mathbb{E}_{w,b}\big[\cos(w^\top q+b)\cos(w^\top k+b)\big]=\tfrac12 e^{-\lVert q-k\rVert^2/2}$ 得
 
-`ch06` 第 4 节实测（归一化输入后，温度 $T{=}2$）：
+$$ \mathbb{E}\big[\phi(q)^\top\phi(k)\big]
+= e^{\lVert q\rVert^2/2}\cdot e^{\lVert k\rVert^2/2}\cdot \frac{2}{D}\cdot \frac{D}{2}\, e^{-\lVert q-k\rVert^2/2}
+= e^{\lVert q\rVert^2/2+\lVert k\rVert^2/2}\, e^{-\lVert q-k\rVert^2/2}
+= e^{\,q^\top k} $$
 
-| 特征维 $D$ | 相对误差 |
+即**无偏**，不需要任何修正项。实测（$D{=}2{\times}10^5$ 蒙特卡洛，单位范数 $q,k$、$T{=}2$）：
+估计值 $0.739$ vs $e^{q^\top k}=0.719$，差的 3% 是采样噪声；
+若按旧版错误地再乘一个 $e^{-\lVert q\rVert^2/2-\lVert k\rVert^2/2}$，会得到 $0.100$，差近一个数量级。
+
+`ch06` 第 4 节实测（归一化输入后，温度 $T{=}2$；相对误差 $=\lVert O_{feat}-O_{softmax}\rVert/\lVert O_{softmax}\rVert$）：
+
+| 特征 | 相对误差 |
 |---|---|
-| 64 | 1.1513 |
-| 256 | 0.3874 |
-| 1024 | 0.2013 |
-| 4096 | 0.0975 |
+| ReLU 特征（$\phi=\mathrm{relu}(x)+1$） | 0.2290 |
+| FAVOR+ $D{=}64$ | 1.1513 |
+| FAVOR+ $D{=}256$ | 0.3874 |
+| FAVOR+ $D{=}1024$ | 0.2013 |
+| FAVOR+ $D{=}4096$ | 0.0975 |
+| FAVOR+ $D{=}16384$ | 0.0481 |
 
 **误差随 $D$ 单调下降但收敛慢**（$O(1/\sqrt D)$），这就是 Performer 类方法在实践中
 不如 softmax attention 的主要原因之一。
@@ -124,9 +151,13 @@ $$ S k_t \approx \underbrace{v_t}_{\text{想要的}} + \underbrace{\sum_{j<t}(v_
 
 解决办法：写入前**先擦除**与该 key 关联的旧值（Widrow-Hoff / delta rule）：
 
-$$ S_t = S_{t-1} + \beta_t\big(v_t - S_{t-1}k_t\big) k_t^\top $$
+$$ S_t = S_{t-1} + \beta_t\big(v_t - S_{t-1}k_t\big) k_t^\top,\qquad \beta_t = \frac{1}{\lVert k_t\rVert^2} $$
 
-`ch06` 第 5 节用一个"联想记忆召回"任务演示（$n_{pairs}{=}32$）：
+（$\beta_t$ 是**步长**：把 $\beta_t=1/\lVert k_t\rVert^2$ 代入，一次更新就精确满足 $S_t k_t = v_t$，
+即把 $k_t$ 方向上的旧记忆整条擦除、换成 $v_t$；$k_t$ 已归一化时 $\beta_t=1$。
+代码里正是 `S + torch.outer(v - S @ k, k) / (k @ k)`。）
+
+`ch06` 第 5 节用一个"联想记忆召回"任务演示（$n_{pairs}{=}32$，$d{=}32$，状态已满秩）：
 
 | 方法 | 召回误差 |
 |---|---|
@@ -148,7 +179,7 @@ cd code && python ch06_linear_attention.py
 
 1. 推导 $S_t = \sum_{j\le t}\lambda^{t-j} v_j k_j^\top$，并说明 $\lambda$ 对奇异值的缩放。
 2. 为什么 chunkwise 里块内系数是 $\lambda^{c-1-\mathrm{idx}}$ 而不是 $\lambda^{\mathrm{idx}}$？
-3. 用 `torch.outer` 手写 $S_t$ 递推，与 `einsum("bnk,bnv->bkv")` 对比，验证一致。
+3. 用 `torch.outer` 手写 $S_t$ 递推，与 `einsum("bnv,bnk->bvk")` 对比，验证一致。
 4. 设计一个"联想召回"任务：随机 $K$ 对 $(k_i, v_i)$，测随 $t$ 增大线性注意力的召回误差曲线，
    观察在 $t \approx d$ 处的拐点。
 

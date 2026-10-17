@@ -72,7 +72,7 @@ for i in range(0, N, bq):          # Q 块（外层）—— 结果写回 HBM
 | 检查 | 结果 |
 |---|---|
 | 因果 / 非因果 × 4 组分块大小 vs 朴素 | `max|Δ| ≈ 4e-6` |
-| 大 logits（$× 20$）数值稳定 | PASS |
+| 大 logits（Q、K 各 $× 50$，logits 到 $\pm 50{\times}d$ 量级）数值稳定 | PASS |
 | 不同 `bq/bk` 之间互相一致 | PASS |
 | 梯度 $\partial L/\partial Q,\partial L/\partial K,\partial L/\partial V$ | PASS |
 
@@ -118,15 +118,22 @@ for j in range(...):
     qk = tl.dot(q, k) * qk_scale
     qk = tl.where(mask, qk, -inf)
     m_new = tl.maximum(m_i, tl.max(qk, 1))
-    alpha = tl.math.exp2(m_i - m_new)     # 用 exp2 而非 exp：硬件上更快
-    p = tl.math.exp2(qk - m_new)
+    alpha = tl.math.exp2((m_i - m_new) * 1.4426950408889634)   # log2 e
+    p = tl.math.exp2((qk - m_new[:, None]) * 1.4426950408889634)
     l_i = l_i * alpha + tl.sum(p, 1)
-    acc = acc * alpha + tl.dot(p.to(fp8/bf16), v)
+    acc = acc * alpha[:, None] + tl.dot(p.to(fp8/bf16), v)
 ```
 
 关键技巧：
 
-- **用 `exp2` 代替 `exp`**：$e^x = 2^{x\log_2 e}$，把 $\log_2 e$ 吸收进 $1/\sqrt d$ 里（CH02 的标量吸收！）；
+- **用 `exp2` 代替 `exp`**：因为 $e^x = 2^{x\log_2 e}$，所以 **必须显式乘 $\log_2 e = 1.4426950408889634$**
+  （上面 `* 1.4426950408889634` 就是它的来源，与 `ch05.py` 的 Triton 附录一致）。
+  漏掉这个因子，$p$ 会变成 $2^{s-m}$ 而不是 $e^{s-m}$，结果直接错；
+- 另一种等价做法是 CH02 的**标量吸收**：把 $\log_2 e$ 折进 `sm_scale`，这样 `exp2` 前就不用再乘。
+  两种写法的差别体现在 $L$ 的单位上：
+  - 本文件 `ch05.py` 的"显式乘"写法：$m$ 仍是自然对数单位，$L = m + \log \ell = \mathrm{LSE}$；
+  - "吸收进 scale"的写法：$m,\ell,L$ 整体活在 $\log_2$ 单位下，$L = (\log_2 e)\cdot \mathrm{LSE}$
+    （$L$ 要除以 $\log_2 e$ 才是自然对数的 LSE）。反向用 $L$ 时需保持同一约定；
 - `tl.dot` 走 tensor core，要求块大小是 16 的倍数；
 - mask 用 `tl.where`，且完全被 mask 的块直接跳过（省算力）。
 
@@ -141,7 +148,10 @@ cd code && python ch05_flash_attention.py
 ## 练习
 
 1. 手推在线 softmax 的递推式，说明为什么 $\ell$ 和 $O$ 的重缩放因子**必须相同**。
-2. 若 $S$ 的某些行整行被 mask（全 $-inf$），$\ell = 0$ 会怎样？代码里怎么兜住？（看 `nan_to_num`）
+2. 若 $S$ 的某些行整行被 mask（全 $-\infty$），会怎样？为什么只对重缩放因子做 `nan_to_num` 不够？
+   （提示：此时 $m_{new}=-\infty$，于是 $P=\exp(S-m_{new})=\exp(\mathrm{nan})=\mathrm{nan}$，
+   $\ell$ 和 $O$ 也跟着变 nan——**不会是 0**，实测 $\ell=\mathrm{nan}$。
+   所以**对 $P$ 也要做 `nan_to_num`**（$\mathrm{nan}\to 0$），代码里目前只兜住了 $e^{m_{old}-m_{new}}$。）
 3. 把 `flash_attention` 改成支持 GQA（K/V 头数不同），验证一致。
 4. 为什么反向"重算"反而更快？（提示：重算的 GEMM 是计算受限，而存/读 $N^2$ 是带宽受限）
 

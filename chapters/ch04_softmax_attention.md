@@ -37,13 +37,12 @@ $$ \boxed{\mathrm{Var}(q^\top k) = d,\qquad \mathrm{std}(q^\top k) = \sqrt d} $$
 
 $$ \mathrm{sr}(A) = \frac{\sum_i \sigma_i^2}{\sigma_{\max}^2} $$
 
-它衡量"这个算子实际用了多少维"。实测（$d{=}512$ 的 logits 乘不同温度）：
+它衡量"这个算子实际用了多少维"。实测（`ch04` 第 6 节：H=8、N=256 的随机 logits 乘不同温度）：
 
 | 缩放系数 | 稳定秩 | 现象 |
 |---|---|---|
 | $\times 0.2$ | 1.04 | 几乎均匀平均，输出被"抹平" |
 | $\times 1.0$ | 2.60 | —— |
-| $\times 1/\sqrt d$ | —— | 正常范围 |
 | $\times 3.0$ | 32.13 | 开始尖锐 |
 | $\times 8.0$ | 64.45 | 接近 one-hot，梯度消失 |
 
@@ -61,7 +60,8 @@ $$ \mathrm{LSE}(s) = m + \log\sum_j e^{s_j - m} $$
 
 $\log\mathrm{softmax}$ 直接是 $s_i - \mathrm{LSE}(s)$，交叉熵损失也用 LSE 算，全程不产生大数。
 
-`ch04` 第 2 节用 `logits` 很大的情形验证了手写 LSE 与 `F.cross_entropy` 一致。
+`ch04` 第 2 节用 `logits` 很大的情形（`randn(4,100)*20`）验证了手写 LSE 与
+`torch.logsumexp` / `torch.log_softmax` 一致（两条 `[PASS]`）。
 
 ## 4. 因果掩码 = 加性 $0/-\infty$ 矩阵
 
@@ -71,9 +71,15 @@ $$ M_{nm} = \begin{cases}0, & n \ge m\\ -\infty, & n < m\end{cases} $$
 
 写成矩阵语言：
 
-$$ A = \mathrm{softmax}(S + M) = \mathrm{softmax}\big(\mathrm{tril}(S)\big) \quad(\text{行归一化意义下}) $$
+$$ A = \mathrm{softmax}(S + M) = \text{行归一化}\big(\mathrm{tril}(e^{S})\big),\qquad (e^S)_{nm} = e^{s_{nm}} $$
 
 也就是"把矩阵乘限制到下三角"。这直接给出 FLOPs 减半（$2N^2d \to N^2d$ 每部分）。
+
+> ⚠️ 被 mask 掉的位置要填 **$-\infty$ 而不是 0**：只有 $-\infty$ 才有 $e^{-\infty}=0$。
+> 写成 $\mathrm{softmax}(\mathrm{tril}(S))$ 是错的——那是在 **logits** 上做 `tril`，
+> 上三角被填成 $0$，于是 $e^{0}=1\neq 0$，掩码完全失效：
+> 实测 $N{=}6$ 时上三角最大值高达 **0.206**（正确做法应恒为 0）。
+> 正确写法是先取指数、再 `tril`（等价地加 $-\infty$ 掩码），然后做行归一化。
 
 > 实现细节：`-inf` 在 fp16/bf16 里参与 `exp` 会得到 `nan`（`-inf - (-inf)`）。
 > 标准做法是用一个**有限的大负数**（如 `-1e9` 或 `torch.finfo(dtype).min`），
@@ -90,7 +96,8 @@ $$ A = \mathrm{softmax}(S + M) = \mathrm{softmax}\big(\mathrm{tril}(S)\big) \qua
 矩阵视角：K/V 头的重复 = 把 $(H_{kv}, D)$ 的张量沿 head 维**广播** $g$ 次：
 
 ```python
-# k: (N, Hkv, D)  ->  (N, H, D)，零拷贝
+# k: (N, Hkv, D)  ->  (N, H, D)
+# expand 是零拷贝（stride=0 视图），但随后的 reshape 会物化出一份真实拷贝
 k = k.unsqueeze(2).expand(N, Hkv, g, D).reshape(N, H, D)
 ```
 
@@ -129,7 +136,7 @@ cd code && python ch04_softmax_attention.py
 1. 推导 $\partial\,\mathrm{softmax}(s)_i / \partial s_j = p_i(\delta_{ij} - p_j)$，并说明为何 $p$ 接近 one-hot 时梯度消失。
 2. 证明行随机矩阵的乘积仍是行随机矩阵（多层注意力堆叠的"保凸组合"性质）。
 3. 为什么 MQA 有时掉点？从"不同 head 想 attend 到不同位置"的秩的角度解释。
-4. 计算 LLama-3-8B（32 层、$H_{kv}{=}8$、$D{=}128$）在 $t{=}8192$、bf16 下的 KV Cache 大小。
+4. 计算 Llama-3-8B（32 层、$H_{kv}{=}8$、$D{=}128$）在 $t{=}8192$、bf16 下的 KV Cache 大小。
 
 ---
 

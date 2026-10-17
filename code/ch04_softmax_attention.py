@@ -110,7 +110,7 @@ def demo_gqa():
         k_rep = k.repeat_interleave(g, dim=1)
         v_rep = v.repeat_interleave(g, dim=1)
         o1 = mha(q, k_rep, v_rep, causal=True)
-        # 写法 2：用 expand + reshape 零拷贝广播（B,Hkv,1,N,D → B,Hq,N,D）
+        # 写法 2：expand 零拷贝广播（stride=0 视图）+ reshape 物化（B,Hkv,1,N,D → B,Hq,N,D）
         k_b = k.unsqueeze(2).expand(B, Hkv, g, N, D).reshape(B, Hq, N, D)
         v_b = v.unsqueeze(2).expand(B, Hkv, g, N, D).reshape(B, Hq, N, D)
         o2 = mha(q, k_b, v_b, causal=True)
